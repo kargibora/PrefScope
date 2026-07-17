@@ -38,7 +38,7 @@ def test_verify_single_text_passes_faithful_feature():
 
     f0 = out.set_index("feature_id").loc[0]
     assert f0["agreement"] == 1.0
-    assert f0["correlation"] == 1.0
+    assert f0["correlation"] == pytest.approx(1.0)
     assert bool(f0["fidelity_pass"]) is True
 
     f1 = out.set_index("feature_id").loc[1]
