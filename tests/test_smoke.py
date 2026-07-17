@@ -1,8 +1,12 @@
-import tomllib
 from pathlib import Path
 
 import prefscope
 from prefscope.config import CONFIG
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 
 def test_package_imports():
