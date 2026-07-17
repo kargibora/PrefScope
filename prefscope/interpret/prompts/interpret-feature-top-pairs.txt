@@ -1,0 +1,49 @@
+# Task Overview
+
+You are a machine learning researcher who has trained a neural network on a text dataset. You are trying to understand what text feature causes a specific neuron in the neural network to fire.
+
+Each dataset example consists of a pair of conversations between a human and an assistant (either a human forum user or a chatbot) in response to a prompt (e.g., a question, a Reddit post, a request for advice, etc.).
+Some conversations are multi-turn, others are single-turn.
+
+To complete your task, you are given several examples; each example consists of CONTEXT, RESPONSE A, and RESPONSE B. RESPONSE A and RESPONSE B are two different responses to the same CONTEXT, shown with a signed activation value.
+In the high-activation (ACTIVATING) examples the signed activation is POSITIVE, which means RESPONSE A expresses the feature's positive direction MORE strongly than RESPONSE B — so the property you are naming is what A has that B lacks. Control examples (activation near zero) are silent and have NO designated side.
+Any given pair may differ in many unrelated ways. The high-activation examples are evidence about ONE candidate feature; the control examples help rule out descriptions that are too broad.
+
+Your goal is to identify the single, most specific distinction that is best-supported and predominant across the high-activation examples — the property that holds for most of them — and to describe it as a concise, natural language concept. SAE features are noisy, so a few counterexamples do not rule a description out; weigh the predominant pattern. Abstain only if no single distinction is predominant, not merely because one example disagrees.
+
+# Instructions
+
+First, for each example, consider the most apparent difference between A and B.
+Then, synthesize the single feature that best explains the predominant pattern across the activating examples, accounting for — but not overturned by — a few counterexamples.
+
+Describe the feature as the predicate whose PRESENCE increases with the positive activation — usually an observable attribute the high-activating side HAS ("discusses environmental impact", not "does not discuss the environment"). It MAY, however, be an observable OMISSION or avoidance when that is genuinely what tracks the activation — e.g. "declines to give a direct recommendation" or "answers without citing sources". In that case, name the omission itself; do NOT invent a correlated positive property to dodge the "no absence" rule. The test is: does this predicate become MORE true as activation goes up? (Whether an omission is good or bad is a separate, later judgement.)
+
+## Example Features
+
+Example features could be:
+- "states a personal opinion"
+- "discusses environmental impact"
+- "complies with a harmful request"
+- "adopts a formal, professional tone"
+
+## Additional Rules
+
+Rules about the feature you identify:
+- The feature should be objective, focusing on concrete attributes (e.g., "is helpful" is not concrete enough).
+- ATOMIC: one property only — do NOT join several with "and" or "or".
+- POSITIVE POLE: name the predicate whose presence tracks the positive activation — an attribute the response HAS, or a specific, observable OMISSION/avoidance it performs (e.g. "answers without citing sources"). Do not name a vague "lacks X".
+- Err on the side of being concise.
+- The feature shouldn't refer to "response A"/"response B" or use comparatives ("more", "instead of"); it should be an attribute that could be present in an individual response.
+
+# Examples
+
+EXAMPLES:
+----------------
+{examples}
+----------------
+
+# Output
+
+Do not output anything besides the feature. Your response should be formatted exactly as shown in the Example Features above.
+Please suggest exactly one description, starting with "-" and surrounded by quotes. Your response is:
+- "

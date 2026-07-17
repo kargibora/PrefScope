@@ -1,0 +1,43 @@
+# Task Overview
+
+You are interpreting a single feature of a sparse autoencoder trained on individual chatbot responses. The feature activates on some responses and not on others.
+
+You are given several RESPONSES that strongly activate the feature (each inside an <example> block), and several that do NOT activate it. Each is shown with its CONTEXT (the user prompt it answered) and the feature's activation value.
+
+# Instructions
+
+Identify the single, specific property that the HIGH-ACTIVATING responses share and the NON-ACTIVATING ones lack.
+
+The non-activating examples are SILENT controls: the feature does not fire on them. The feature is the property that is PRESENT in the activating responses but ABSENT in these controls — not a property both groups share. Do not assume the controls were picked to be subtly similar; they may simply be unrelated responses on which the feature is silent, so a clear, obvious difference is a perfectly good answer. If a candidate property (for example, bullet-point or numbered-list formatting) also appears in the non-activating examples, it is NOT the feature; keep looking for what actually separates the two groups.
+
+Name the MOST SPECIFIC property that distinguishes them. Generic formatting — bullet lists, numbered lists, headings — is common to many responses, so name it only if it is the single trait that separates activating from non-activating here. If a more specific content, intent, or style property separates them, name that instead.
+
+The property must be something directly observable in the RESPONSE — how it is written or what it does — NOT the topic of the user's prompt. The activating responses may simply happen to answer similar prompts; use the CONTEXT only to interpret what the response is doing, never to name the request's subject. For example, if all activating responses answer math questions with long worked derivations, the feature is "gives a long step-by-step derivation", not "answers a math question".
+
+Weigh two kinds of property equally — do not privilege topic over style:
+- CONTENT / INTENT: what the response does (defines a term, refuses a request, translates, gives instructions, lists options).
+- STYLE / BEHAVIOUR: how it is written — tone, verbosity, hedging vs. confidence, formality, politeness, directness, sycophancy, stance, or a distinctive formatting habit that is genuinely shared by all activators.
+
+A shared *way of writing* is as valid a feature as a shared subject.
+
+## Example features
+- "hedges the answer with cautious qualifiers"
+- "refuses a request on safety grounds"
+- "gives a terse, direct answer with no preamble"
+- "adopts an enthusiastic, encouraging tone"
+- "explains the meaning or usage of an English word"
+- "responds in Russian"
+
+## Rules
+- ATOMIC: one property only. Do not join several with "and" or "or". If the activating responses share several unrelated properties, that is a polysemantic feature — say so (status) rather than combining them into one label.
+- The property is normally something the response HAS, but it MAY be a specific, observable OMISSION or avoidance when that is genuinely what the activating responses share — e.g. "answers without citing sources", "declines to give a direct recommendation", "gives no worked example". Name the omission itself; do not invent a correlated positive property to avoid it. It must still be directly observable in the response, not a guess about the topic.
+- A property of a single response — no comparatives ("more", "less", "instead of").
+- Objective and concrete ("is helpful" is too vague).
+- Judge it in the RESPONSE; do not name a property of the prompt.
+- If the activating responses share no single coherent property, or there are too few/weak examples to tell, abstain (status polysemantic / insufficient_evidence) instead of inventing a label.
+
+# Examples
+
+{examples}
+
+# Output

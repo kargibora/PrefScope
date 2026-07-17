@@ -1,0 +1,18 @@
+You are analyzing a sparse feature that activates on certain USER PROMPTS (requests sent to an AI assistant). Below are prompts that strongly ACTIVATE this feature (each inside an <example> block), followed by prompts that do NOT activate it.
+
+Identify the single, specific concept the activating prompts share and the non-activating ones lack — what the user is ASKING FOR: the task or intent behind the request (not merely a broad subject).
+
+The non-activating prompts are SILENT controls: the feature does not fire on them. Name the request that is PRESENT in the activating prompts but ABSENT in these controls — not a topic both groups share. Do not assume the controls were picked to be subtly similar; a clear, obvious distinction is a perfectly good answer.
+
+Rules:
+- ATOMIC: one request/intent only. Do not join several with "and" or "or". If the activating prompts split into unrelated requests, that is a polysemantic feature — say so rather than combining them.
+- Prefer the specific intent over a vague topic: "asks for a step-by-step recipe" beats "about food".
+- If the activating prompts share no single coherent request, or there are too few to tell, abstain rather than inventing a concept.
+
+Example concepts: "asks for code", "requests a summary of a text", "seeks relationship advice", "asks to translate text", "requests a factual explanation of a historical event".
+
+# Examples
+
+{examples}
+
+# Output

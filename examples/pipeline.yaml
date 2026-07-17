@@ -1,0 +1,47 @@
+# Example PrefScope pipeline config — `prefscope run --config examples/pipeline.yaml`.
+#
+# Declares the per-lens analysis chain and which swappable component runs each stage.
+# Every component is resolved by name through the registry; to switch a verifier or a
+# clustering algorithm, edit the one line below (run `prefscope cluster-features --help`
+# or read the registry for the available names). Set `lens_kind: prompt` for a prompt lens.
+
+lens_dir: lenses/indiv_8b              # frozen completion lens (z_diff/z_a/z_b + manifest)
+corpus: corpora/arena_merged.parquet  # needed by win-relevance (human_pref); also used to
+                                      # re-attach prompt/completion text for naming
+out_dir: results/pipeline/indiv_8b    # all artifacts land here
+
+# Run a subset/reordering by listing stages; omit `stages` to run the full chain.
+stages: [name, verify, cluster, win-relevance]
+
+# One LLM client shared by name / verify / cluster naming.
+llm:
+  backend: openai                     # openai | claude-cli | codex-cli
+  model: deepseek/deepseek-v3.2
+  api_base: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+
+# --- swappable components: `name` selects the registered strategy, the rest are params ---
+# Omitted params fall back to each component's own defaults (e.g. n_active=12, n_zero=8) —
+# note these differ from the `interpret name` flag defaults (10/10). Unknown/misspelled
+# params are rejected up front, listing the valid ones.
+interpreter:
+  name: auto                          # auto -> individual/pairwise from the lens manifest
+  n_active: 12
+  n_zero: 8
+
+verifier:
+  name: auto                          # auto -> individual/pairwise; or pairwise/individual
+  n_per_bucket: 12
+  fidelity_threshold: 0.3
+
+clusterer:
+  name: mi-leiden                     # mi-leiden | spherical-kmeans | agglomerative
+                                      # mi-leiden needs `uv sync --extra cluster` (igraph + leidenalg)
+  resolution: 1.2                     # mi-leiden: higher -> more, smaller behaviors
+  knn: 6                              # mi-leiden: sparsify to each feature's top-k edges
+  # cluster_on: difference            # difference (z_diff) | individual ([z_a; z_b])
+  # fidelity_only: true               # cluster only fidelity-passing features
+  # name_clusters: true               # LLM-name each behavior
+
+win_relevance:
+  all_features: false                 # false -> restrict to fidelity-passing features

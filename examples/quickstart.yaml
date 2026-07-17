@@ -1,0 +1,28 @@
+# End-to-end config paired with the README's `lenses/demo` build command.
+# The deliberately small sample counts make this a smoke test, not a research run.
+lens_dir: lenses/demo
+corpus: examples/sample_corpus.parquet
+out_dir: results/demo
+stages: [name, verify, cluster, win-relevance]
+
+llm:
+  backend: openai
+  model: deepseek/deepseek-v3.2
+  api_base: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+
+interpreter:
+  name: auto
+  n_active: 3
+  n_zero: 3
+
+verifier:
+  name: auto
+  n_per_bucket: 3
+
+clusterer:
+  name: spherical-kmeans
+  n_clusters: 4
+
+win_relevance:
+  all_features: false

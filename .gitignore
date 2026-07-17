@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# uv / venv
+.venv/
+.python-version
+
+# Generated data and features (regenerate from annotations)
+data/*.parquet
+features/*.npy
+features/*.parquet
+
+# Caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local credentials
+hpc_key
+hpc_key.pub
+hpc_key-cert.pub
+
+# Generated lens artifacts
+lens_*/
+
+# Local data and working notes
+/data/
+docs/STATUS.md
+docs/design/
+
+# Standalone companion React viewer; it is versioned in OELLM-JudgeLens.
+viewer-web/
+
+# Local development configuration
+/CLAUDE.md
+/.claude/

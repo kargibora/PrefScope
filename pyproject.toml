@@ -1,0 +1,139 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "prefscope"
+version = "0.1.0a0"
+description = "PrefScope: an interpretability framework for diagnosing post-training data and model behavior with sparse autoencoders."
+license = { text = "MIT" }
+authors = [{ name = "Bora Kargı" }]
+keywords = ["interpretability", "post-training", "preference-data", "sparse-autoencoder", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+readme = "README.md"
+requires-python = ">=3.10"
+# Runtime deps are the ones the `prefscope` package actually imports. Heavy optional
+# backends (embedding accelerators, viewer, clustering) live in extras below.
+# scipy + pyyaml were imported but only available transitively — declared here now.
+# sentence-transformers / matplotlib were declared but unused by the package (embedding
+# goes through an OpenAI-compatible endpoint; plotting lives in the extras).
+dependencies = [
+    # Qwen3 embedding model support landed after the older 4.45 floor.
+    "transformers>=4.51",
+    "pandas>=2.0",
+    "pyarrow>=15",
+    "numpy>=1.26",
+    "scikit-learn>=1.3",
+    "scipy>=1.11",
+    "pyyaml>=6",
+    "tqdm>=4.66",
+    "openai>=1.40",
+]
+
+[project.scripts]
+prefscope = "prefscope.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/kargibora/PrefScope"
+Repository = "https://github.com/kargibora/PrefScope"
+Documentation = "https://github.com/kargibora/PrefScope/tree/main/docs"
+Issues = "https://github.com/kargibora/PrefScope/issues"
+
+[project.optional-dependencies]
+# Optional visualization dependencies.
+plots = ["matplotlib>=3.8"]
+# PyTorch accelerator builds — pick ONE at sync time (CUDA vs ROCm can't be
+# auto-detected; they are the same platform). On macOS, `--extra cpu` resolves the
+# regular PyPI wheel, which includes MPS support.
+#   uv sync --extra cpu     # CPU-only / CI
+#   uv sync --extra cu121   # NVIDIA CUDA 12.1
+#   uv sync --extra rocm    # AMD ROCm 6.3
+cpu = ["torch>=2.3"]
+cu121 = ["torch>=2.3"]
+rocm = ["torch>=2.3", "pytorch-triton-rocm; sys_platform == 'linux'"]
+viewer = [
+    "streamlit>=1.36",
+    "plotly>=5.22",
+]
+arena = [
+    "datasets>=2.14",
+]
+# MI-graph + Leiden feature clustering (cluster_features method="mi-leiden").
+cluster = [
+    "igraph>=0.11",
+    "leidenalg>=0.10",
+]
+# fast bulk embedding of large models (Linux + CUDA; install on the GPU box).
+# NOTE: needs Python 3.10-3.12 — vLLM depends on ray, which has no 3.13 wheel.
+#   uv python install 3.12 && uv venv --python 3.12 && uv sync --extra vllm
+vllm = [
+    "vllm>=0.6",
+]
+
+[tool.hatch.build.targets.wheel]
+# Package only the importable library.
+packages = ["prefscope"]
+
+[tool.hatch.build.targets.sdist]
+# Keep source distributions restricted to supported package and documentation files.
+only-include = [
+    "prefscope", "docs", "examples", "LICENSE", "README.md", "CONTRIBUTING.md",
+    "CHANGELOG.md", "pyproject.toml",
+]
+
+[tool.uv]
+# The cpu / cu121 / rocm torch builds are mutually exclusive.
+conflicts = [[{ extra = "cpu" }, { extra = "cu121" }, { extra = "rocm" }]]
+
+# Route torch to the right wheel index per chosen extra. With no accelerator extra,
+# torch is intentionally absent. The Darwin marker keeps the Linux-only CPU index
+# off macOS so the `cpu` extra falls back to the PyPI wheel with MPS support.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "platform_system != 'Darwin'" },
+    { index = "pytorch-cu121", extra = "cu121", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+]
+# torch's ROCm wheel depends on pytorch-triton-rocm, which is only on the ROCm
+# index (not PyPI); route it there too or the rocm extra is unsatisfiable.
+pytorch-triton-rocm = [
+    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.3"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.14.14",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+markers = [
+    "slow: requires heavy models or live API (deselect with -m 'not slow')",
+]

@@ -1,0 +1,54 @@
+# Higher-cost interpretation/verification profile for a real, sufficiently large lens.
+# Replace the paths/models for your run. With M features this makes roughly
+# M*(3 naming proposals + 1 synthesis + 300 verification judgments) LLM calls.
+lens_dir: lenses/indiv_8b
+corpus: corpora/arena_merged.parquet
+out_dir: results/research/indiv_8b
+stages: [name, verify, cluster, win-relevance]
+
+# `llm` remains the fallback (and is used for optional cluster naming). Keeping
+# name/verify models explicit makes independence auditable in the config.
+llm:
+  backend: openai
+  model: deepseek/deepseek-v3.2
+  api_base: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+name_llm:
+  backend: openai
+  model: deepseek/deepseek-v3.2
+  api_base: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+verify_llm:
+  backend: openai
+  model: your-provider/independent-verifier-model
+  api_base: https://openrouter.ai/api/v1
+  api_key_env: OPENROUTER_API_KEY
+
+interpreter:
+  name: auto
+  n_active: 12
+  n_zero: 8
+  negatives: close
+  n_candidates: 3
+  candidate_pool_factor: 3
+  seed: 0
+
+verifier:
+  name: auto
+  sampling: stratified-random
+  n_examples: 300
+  negatives: close
+  fidelity_threshold: 0.3
+  min_success_rate: 0.8
+  min_bucket: 20
+  seed: 0
+
+clusterer:
+  name: mi-leiden
+  resolution: 1.2
+  knn: 6
+  cluster_on: individual
+  fidelity_only: true
+
+win_relevance:
+  all_features: false
