@@ -17,7 +17,7 @@ the saved codes with NO re-embedding.
         --prompt-enc results_judgearena/prompt_enc \
         --prompt-names results_judgearena/prompt_feature_names.csv \
         --dataset-id qwen --label "Qwen 9B vs 27B (alpaca smoke)" \
-        --out-dir viewer-web/public/data/datasets/qwen
+        --out-dir viewer-data/datasets/qwen
 """
 from __future__ import annotations
 

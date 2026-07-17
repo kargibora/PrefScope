@@ -36,8 +36,8 @@ lens_*/
 docs/STATUS.md
 docs/design/
 
-# Standalone companion React viewer; it is versioned in OELLM-JudgeLens.
-viewer-web/
+# Generated static viewer bundle
+/viewer-data/
 
 # Local development configuration
 /CLAUDE.md

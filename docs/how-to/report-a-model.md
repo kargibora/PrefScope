@@ -93,7 +93,7 @@ with the outcome). Pass `--report-battles` to populate that drill-in:
 python scripts/export_viewer_data.py --lens-dir lenses/mylens --corpus battles.parquet \
     --prompt-lens lenses/promptlens --completion-lens lenses/mylens \
     --prompt-interpret-dir results/promptlens \
-    --out viewer_data --report-battles
+    --out viewer-data --report-battles
 ```
 
 The drill-in needs a built bank (for the per-model diagnosis) and a prompt lens. Without

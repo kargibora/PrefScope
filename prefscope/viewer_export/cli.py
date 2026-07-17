@@ -18,6 +18,8 @@ from .sanitize import _dumps, _read_csv, _round
 from .tables import (export_bias_screen, export_conditional, export_delta,
                      export_elicitation, export_prompt_features)
 
+BUNDLE_SCHEMA_VERSION = 2
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -43,7 +45,7 @@ def main() -> int:
     ap.add_argument("--prompt-interpret-dir", default=None, dest="prompt_interpret_dir",
                     help="dir with prompt_feature_{names,fidelity,clusters}.csv -> prompt_features.json")
     ap.add_argument("--corpus", default="", help="corpus parquet for example battles")
-    ap.add_argument("--out", default="viewer-web/public/data")
+    ap.add_argument("--out", default="viewer-data")
     ap.add_argument("--examples-per-feature", type=int, default=12)
     ap.add_argument("--examples-by-model", action="store_true", dest="examples_by_model",
                     help="emit examples_by_model.json: per (model × feature) the model's OWN "
@@ -348,7 +350,7 @@ def main() -> int:
     # current data), version mismatches surface as a banner instead of silent weirdness.
     from datetime import datetime, timezone
     manifest = {
-        "schema_version": 2,
+        "schema_version": BUNDLE_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "lens": lens.name,
         "files": sorted(set(written)),

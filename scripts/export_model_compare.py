@@ -19,7 +19,7 @@ shows a raw feature id.
     python scripts/export_model_compare.py \
         --encoded results_judgearena/encoded_qwen --lens results_judgearena/lens \
         --corpus corpora/judgearena_qwen.parquet \
-        --out viewer-web/public/data/model_compare.json
+        --out viewer-data/model_compare.json
 """
 from __future__ import annotations
 

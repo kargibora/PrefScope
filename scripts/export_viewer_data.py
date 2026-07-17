@@ -7,7 +7,7 @@ historical entry point (`python scripts/export_viewer_data.py`) and import path
 
 Usage:
     python scripts/export_viewer_data.py --lens-dir lens_arena8b_m32_k4 \
-        --corpus corpora/arena_merged.parquet --out viewer-web/public/data
+        --corpus corpora/arena_merged.parquet --out viewer-data
 """
 from __future__ import annotations
 

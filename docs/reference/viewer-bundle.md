@@ -1,21 +1,14 @@
 # Viewer Bundle Reference
 
 The **viewer bundle** is the directory of static JSON that the `prefscope.viewer_export`
-CLI writes (typically to `viewer-web/public/data/`) and that the companion React viewer
-reads. The browser cannot read `.npy`/`.parquet`, so every artifact is flattened JSON.
-
-The React application is maintained as the separate
-[OELLM-JudgeLens](https://github.com/kargibora/OELLM-JudgeLens) repository. Clone it as
-`viewer-web/` beside this package when developing both projects; the directory is
-ignored here so one repository is never accidentally embedded inside the other.
+CLI writes (to `viewer-data/` by default) for static visualization clients. Browsers
+cannot read `.npy`/`.parquet`, so every artifact is flattened JSON. The export format
+is self-contained and does not depend on a particular viewer repository or directory.
 
 Sources of truth:
 - `prefscope/viewer_export/` — the export implementation
   (`sanitize` / `features` / `diagnosis` / `examples` / `tables` / `maps` / `cli`)
-- [`src/types.ts`](https://github.com/kargibora/OELLM-JudgeLens/blob/main/src/types.ts)
-  — viewer-side types each file must satisfy
-- [`src/data.ts`](https://github.com/kargibora/OELLM-JudgeLens/blob/main/src/data.ts)
-  — load order, optionality, manifest gating
+- `bundle_manifest.json` — schema version, completed files, and processing errors
 
 ## bundle_manifest.json
 
@@ -39,7 +32,8 @@ bundle) or a `schema_version` mismatch surfaces as a banner in the viewer.
 - `errors` — stages that failed during export (the corresponding panel shows
   partial or no data). An entry here distinguishes "processing failed" from
   "input legitimately absent".
-- `schema_version` must equal `BUNDLE_SCHEMA_VERSION` in `viewer-web/src/types.ts`.
+- `schema_version` is emitted from `BUNDLE_SCHEMA_VERSION` in
+  `prefscope.viewer_export.cli`.
 
 ## Artifacts
 

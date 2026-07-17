@@ -1,7 +1,7 @@
-"""Export a PrefScope lens + results into a compact JSON bundle for the web viewer.
+"""Export a PrefScope lens + results into a compact static JSON bundle.
 
-The browser app can't read .npy/.parquet, so this flattens everything the
-`viewer-web` app needs into small JSON files under its public/data/ dir:
+Browsers cannot read .npy/.parquet directly, so this flattens the supported
+artifacts into small JSON files under a standalone output directory:
 
     meta.json        headline numbers (EV, #verified, LOO-R^2, counts)
     features.json    per-feature concept + fidelity + win_assoc
@@ -12,13 +12,13 @@ The browser app can't read .npy/.parquet, so this flattens everything the
 
 Usage:
     python scripts/export_viewer_data.py --lens-dir lens_arena8b_m32_k4 \
-        --corpus corpora/arena_merged.parquet --out viewer-web/public/data
+        --corpus corpora/arena_merged.parquet --out viewer-data
 
 See docs/reference/viewer-bundle.md for the full bundle contract.
 """
 from __future__ import annotations
 
-from .cli import main
+from .cli import BUNDLE_SCHEMA_VERSION, main
 from .diagnosis import export_diagnosis, export_head_to_head
 from .examples import export_examples, export_examples_by_model, export_report_battles
 from .features import (export_features, export_meta, feature_fire_rate,
@@ -48,5 +48,5 @@ __all__ = [
     "_battle_ids_of", "_clip_text", "_concept_map", "_project2d",
     "export_map", "export_prompt_map", "export_response_map",
     # cli
-    "main",
+    "BUNDLE_SCHEMA_VERSION", "main",
 ]
