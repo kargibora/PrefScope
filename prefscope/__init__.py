@@ -1,7 +1,7 @@
 """PrefScope: analyze post-training preference data by concept with sparse autoencoders."""
 import logging
 
-__version__ = "0.1.0a0"
+__version__ = "0.1.0"
 
 # Library convention: emit logs under the ``prefscope`` namespace but stay silent
 # unless the application attaches a handler / configures logging.

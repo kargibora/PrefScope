@@ -7001,7 +7001,7 @@ wheels = [
 
 [[package]]
 name = "prefscope"
-version = "0.1.0a0"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "(sys_platform == 'linux' and extra == 'extra-9-prefscope-cu121') or (extra == 'extra-9-prefscope-cu121' and extra == 'extra-9-prefscope-rocm') or (extra == 'extra-9-prefscope-cpu' and extra == 'extra-9-prefscope-cu121') or (extra == 'extra-9-prefscope-cpu' and extra == 'extra-9-prefscope-rocm')" },

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prefscope"
-version = "0.1.0a0"
+version = "0.1.0"
 description = "PrefScope: an interpretability framework for diagnosing post-training data and model behavior with sparse autoencoders."
 license = { text = "MIT" }
 authors = [{ name = "Bora Kargı" }]
