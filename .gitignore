@@ -6,6 +6,7 @@ __pycache__/
 # uv / venv
 .venv/
 .python-version
+/uv.lock
 
 # Generated data and features (regenerate from annotations)
 data/*.parquet
