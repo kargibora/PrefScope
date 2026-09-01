@@ -19,11 +19,17 @@ import pandas as pd
 
 from prefscope.artifacts import BATTLES, MANIFEST, Z_A, Z_B, Z_PROMPT, lens_battle_ids
 from prefscope.core import registry
+from prefscope.core.manifest import LensManifest
 from prefscope.interpret.io import load_lens_battles
+from prefscope.interpret.select import split_group_ids
+
+
+def _manifest(path: Path) -> LensManifest:
+    return LensManifest.from_dict(json.loads((path / MANIFEST).read_text()))
 
 
 def _load_prompt_lens(lens_dir, corpus):
-    """``(input_rep, meta, instruction_ids, z_prompt, prompts)`` for a prompt lens.
+    """Load prompt codes, text, and SAE semantics for a prompt lens.
 
     A prompt lens has no A/B pair, so its codes live in ``z_prompt`` and the text is the
     prompt itself — mapped from the corpus by battle id. Shared by ``LensCodes`` (naming)
@@ -33,14 +39,17 @@ def _load_prompt_lens(lens_dir, corpus):
     from prefscope.data.corpus import load_corpus
 
     lens_dir = Path(lens_dir)
-    input_rep = json.loads((lens_dir / MANIFEST).read_text()).get("input_rep", "prompt")
-    z_prompt = np.load(lens_dir / Z_PROMPT)
+    manifest = _manifest(lens_dir)
+    input_rep = manifest.input_rep
+    z_prompt = np.load(lens_dir / Z_PROMPT, mmap_mode="r")
     meta = pd.read_parquet(lens_dir / BATTLES)
     bid = lens_battle_ids(meta)
     corp = load_corpus(corpus)
     corp["battle_id"] = corp["battle_id"].astype(str)
     prompts = pd.Series(bid).map(corp.set_index("battle_id")["prompt"]).fillna("").tolist()
-    return input_rep, meta, list(bid), z_prompt, prompts
+    return (input_rep, meta, list(bid), z_prompt, prompts,
+            manifest.activation_polarity or "unknown",
+            manifest.code_semantics or "custom")
 
 
 @dataclass
@@ -62,34 +71,41 @@ class LensCodes:
     z_prompt: np.ndarray | None = None
     prompts: list | None = None
     instruction_ids: list | None = None
+    activation_polarity: str = "unknown"
+    code_semantics: str = "custom"
 
     @classmethod
     def load(cls, lens_dir, annotations=None, *, corpus=None,
              lens_kind: str = "completion") -> "LensCodes":
         lens_dir = Path(lens_dir)
         if lens_kind == "prompt":
-            input_rep, meta, ids, z_prompt, prompts = _load_prompt_lens(lens_dir, corpus)
+            (input_rep, meta, ids, z_prompt, prompts, polarity,
+             semantics) = _load_prompt_lens(lens_dir, corpus)
             return cls(lens_dir=lens_dir, input_rep=input_rep, battles=meta, z_diff=None,
                        z_a=None, z_b=None, lens_kind="prompt", z_prompt=z_prompt,
-                       prompts=prompts, instruction_ids=ids)
-        manifest = json.loads((lens_dir / MANIFEST).read_text())   # a lens always has one
-        single = manifest.get("dataset_mode") == "single"
+                       prompts=prompts, instruction_ids=ids,
+                       activation_polarity=polarity, code_semantics=semantics)
+        manifest_dict = json.loads((lens_dir / MANIFEST).read_text())
+        manifest = LensManifest.from_dict(manifest_dict)
+        single = manifest_dict.get("dataset_mode") == "single"
         if single:
             battles = pd.read_parquet(lens_dir / BATTLES)
             z_diff = None
         else:
             battles, z_diff, _ = load_lens_battles(lens_dir, annotations, corpus=corpus)
-        z_a = np.load(lens_dir / Z_A) if (lens_dir / Z_A).exists() else None
-        z_b = np.load(lens_dir / Z_B) if (lens_dir / Z_B).exists() else None
-        return cls(lens_dir=lens_dir, input_rep=manifest.get("input_rep", "difference"),
+        z_a = np.load(lens_dir / Z_A, mmap_mode="r") if (lens_dir / Z_A).exists() else None
+        z_b = np.load(lens_dir / Z_B, mmap_mode="r") if (lens_dir / Z_B).exists() else None
+        return cls(lens_dir=lens_dir, input_rep=manifest.input_rep,
                    battles=battles, z_diff=z_diff, z_a=z_a, z_b=z_b,
                    lens_kind="completion",
-                   instruction_ids=battles["instruction_id"].astype(str).tolist())
+                   instruction_ids=split_group_ids(battles),
+                   activation_polarity=manifest.activation_polarity or "unknown",
+                   code_semantics=manifest.code_semantics or "custom")
 
 
 _OPT_KEYS = ("features", "n_active", "n_zero", "verify_frac", "seed",
              "abbreviate", "concurrency", "debug_dir", "negatives",
-             "n_candidates", "candidate_pool_factor")
+             "n_candidates", "candidate_pool_factor", "on_result")
 
 
 class NameStrategy(ABC):
@@ -98,11 +114,15 @@ class NameStrategy(ABC):
     def __init__(self, *, features=None, n_active: int = 12, n_zero: int = 8,
                  verify_frac: float = 0.2, seed: int = 0, abbreviate: bool = False,
                  concurrency: int = 1, debug_dir=None, negatives: str = "random",
-                 n_candidates: int = 1, candidate_pool_factor: int = 3) -> None:
+                 n_candidates: int = 1, candidate_pool_factor: int = 3,
+                 on_result=None, pole: str | None = None) -> None:
         if n_candidates < 1:
             raise ValueError("n_candidates must be >= 1")
         if candidate_pool_factor < 1:
             raise ValueError("candidate_pool_factor must be >= 1")
+        if pole not in (None, "positive", "negative"):
+            raise ValueError("pole must be None, 'positive', or 'negative'")
+        self.pole = pole
         self.opts = {k: v for k, v in locals().items() if k in _OPT_KEYS}
 
     @abstractmethod
@@ -129,6 +149,11 @@ class IndividualNameStrategy(NameStrategy):
             raise ValueError(
                 "individual naming needs z_a (and z_b for paired data) — this lens has none (use an "
                 "--input-rep individual lens, or --name-mode pairwise).")
+        if codes.activation_polarity == "signed" and self.pole != "positive":
+            raise ValueError(
+                "individual naming on a signed lens describes only one pole, not the "
+                "complete feature axis; pass pole='positive' / --pole positive to "
+                "acknowledge that limitation, or train a batchtopk-relu lens")
         return name_individual_features(codes.battles, codes.z_a, codes.z_b, client, **self.opts)
 
 
@@ -142,6 +167,14 @@ class SingleTextNameStrategy(NameStrategy):
             raise ValueError(
                 "single-text naming needs a prompt lens (z_prompt + prompt text) — load "
                 "LensCodes with lens_kind='prompt' and a corpus.")
+        if codes.activation_polarity == "signed" and self.pole not in (
+            "positive", "negative"
+        ):
+            raise ValueError(
+                "single-text naming on a signed prompt lens needs pole='positive' or "
+                "pole='negative'")
+        if codes.activation_polarity != "signed" and self.pole == "negative":
+            raise ValueError("a nonnegative prompt lens has no negative pole")
         o = self.opts
         return name_prompt_features(
             codes.prompts, codes.z_prompt, client, features=o["features"],
@@ -150,13 +183,15 @@ class SingleTextNameStrategy(NameStrategy):
             negatives=o.get("negatives", "random"),
             n_candidates=o["n_candidates"],
             candidate_pool_factor=o["candidate_pool_factor"],
-            instruction_ids=codes.instruction_ids)
+            instruction_ids=codes.instruction_ids,
+            on_result=o["on_result"], pole=self.pole or "positive")
 
 
 def resolve_name_mode(mode: str, input_rep: str, lens_kind: str = "completion") -> str:
-    """Pick the naming strategy: a prompt lens -> 'single-text'; else 'auto' maps to
-    individual/pairwise off the manifest input_rep (not file probing)."""
-    if lens_kind == "prompt":
+    """Resolve built-in ``auto`` modes while preserving explicit custom names."""
+    if lens_kind == "prompt" and mode in {
+        "auto", "pairwise", "individual", "single-text",
+    }:
         return "single-text"
     if mode == "auto":
         return "individual" if input_rep == "individual" else "pairwise"
@@ -181,31 +216,39 @@ class VerifyCodes:
     z_b: np.ndarray | None = None
     z_prompt: np.ndarray | None = None
     prompts: list | None = None
+    activation_polarity: str = "unknown"
+    code_semantics: str = "custom"
 
     @classmethod
     def load(cls, lens_dir, annotations=None, *, corpus=None,
              lens_kind: str = "completion") -> "VerifyCodes":
         lens_dir = Path(lens_dir)
         if lens_kind == "prompt":
-            input_rep, meta, ids, z_prompt, prompts = _load_prompt_lens(lens_dir, corpus)
-            return cls("prompt", input_rep, meta, ids, z_prompt=z_prompt, prompts=prompts)
-        input_rep = json.loads((lens_dir / MANIFEST).read_text()).get("input_rep", "difference")
-        manifest = json.loads((lens_dir / MANIFEST).read_text())
-        single = manifest.get("dataset_mode") == "single"
+            (input_rep, meta, ids, z_prompt, prompts, polarity,
+             semantics) = _load_prompt_lens(lens_dir, corpus)
+            return cls("prompt", input_rep, meta, ids, z_prompt=z_prompt,
+                       prompts=prompts, activation_polarity=polarity,
+                       code_semantics=semantics)
+        manifest_dict = json.loads((lens_dir / MANIFEST).read_text())
+        manifest = LensManifest.from_dict(manifest_dict)
+        input_rep = manifest.input_rep
+        single = manifest_dict.get("dataset_mode") == "single"
         if single:
             battles = pd.read_parquet(lens_dir / BATTLES)
             z_diff = None
         else:
             battles, z_diff, _ = load_lens_battles(lens_dir, annotations, corpus=corpus)
-        z_a = np.load(lens_dir / Z_A) if (lens_dir / Z_A).exists() else None
-        z_b = np.load(lens_dir / Z_B) if (lens_dir / Z_B).exists() else None
-        ids = battles["instruction_id"].astype(str).tolist()
-        return cls("completion", input_rep, battles, ids, z_diff=z_diff, z_a=z_a, z_b=z_b)
+        z_a = np.load(lens_dir / Z_A, mmap_mode="r") if (lens_dir / Z_A).exists() else None
+        z_b = np.load(lens_dir / Z_B, mmap_mode="r") if (lens_dir / Z_B).exists() else None
+        ids = split_group_ids(battles)
+        return cls("completion", input_rep, battles, ids, z_diff=z_diff, z_a=z_a,
+                   z_b=z_b, activation_polarity=manifest.activation_polarity or "unknown",
+                   code_semantics=manifest.code_semantics or "custom")
 
 
 _VOPT = ("n_per_bucket", "verify_frac", "seed", "fidelity_threshold", "concurrency",
          "negatives", "embeddings", "min_success_rate", "min_bucket", "sampling",
-         "n_examples")
+         "n_examples", "features", "on_result")
 
 
 class VerifyStrategy(ABC):
@@ -215,15 +258,19 @@ class VerifyStrategy(ABC):
                  fidelity_threshold: float = 0.3, concurrency: int = 1,
                  negatives: str = "random", embeddings=None,
                  min_success_rate: float = 0.8, min_bucket: int = 5,
-                 sampling: str = "extremes", n_examples: int | None = None) -> None:
-        if sampling not in ("extremes", "stratified-random"):
-            raise ValueError("sampling must be 'extremes' or 'stratified-random'")
+                 sampling: str = "extremes", n_examples: int | None = None,
+                 features=None, on_result=None, pole: str | None = None) -> None:
+        from prefscope.interpret.select import normalize_verification_sampling
+        sampling = normalize_verification_sampling(sampling)
         if n_examples is not None and n_examples < 2:
             raise ValueError("n_examples must be >= 2")
         if not 0 <= min_success_rate <= 1:
             raise ValueError("min_success_rate must be in [0, 1]")
         if min_bucket < 1:
             raise ValueError("min_bucket must be >= 1")
+        if pole not in (None, "positive"):
+            raise ValueError("pole must be None or 'positive'")
+        self.pole = pole
         self.opts = {k: v for k, v in locals().items() if k in _VOPT}
 
     @abstractmethod
@@ -244,7 +291,8 @@ class PairwiseVerifyStrategy(VerifyStrategy):
                                concurrency=o["concurrency"],
                                min_success_rate=o["min_success_rate"],
                                min_bucket=o["min_bucket"], sampling=o["sampling"],
-                               n_examples=o["n_examples"])
+                               n_examples=o["n_examples"], features=o["features"],
+                               on_result=o["on_result"])
 
 
 @registry.register("verifier", "individual")
@@ -255,12 +303,22 @@ class IndividualVerifyStrategy(VerifyStrategy):
         from prefscope.interpret.verify import verify_single_text_features
         if codes.z_a is None:
             raise ValueError("individual verify needs z_a (an --input-rep individual lens).")
+        if codes.activation_polarity == "signed" and self.pole != "positive":
+            raise ValueError(
+                "individual verification on a signed lens only validates its positive "
+                "pole; pass pole='positive' / --pole positive to acknowledge that "
+                "limitation, or train a batchtopk-relu lens")
         paired = codes.z_b is not None
         texts = codes.battles["completion_a"].tolist()
         z_stack = codes.z_a
         if paired:
             texts += codes.battles["completion_b"].tolist()
-            z_stack = np.concatenate([codes.z_a, codes.z_b], axis=0)
+            # Random-control verification only reads one feature column at a time. Keep
+            # the two memory-mapped matrices separate instead of allocating a full 2N x M
+            # stack (about 16 GB for an m=8192 lens). Similarity-based controls still
+            # need a dense code space, so retain their historical materialized path.
+            z_stack = ((codes.z_a, codes.z_b) if self.opts.get("negatives") == "random"
+                       else np.concatenate([codes.z_a, codes.z_b], axis=0))
         # Pass the user prompts as CONTEXT so context-dependent concepts (refuses an unsafe
         # request, follows the requested format, answers in the requested language) can be
         # judged in the response — the naming step already sees the context (#6).
@@ -280,7 +338,7 @@ class IndividualVerifyStrategy(VerifyStrategy):
             min_success_rate=o["min_success_rate"], min_bucket=o["min_bucket"],
             sampling=o["sampling"], n_examples=o["n_examples"],
             instruction_ids=list(codes.instruction_ids) * (2 if paired else 1),
-            contexts=contexts)
+            contexts=contexts, features=o["features"], on_result=o["on_result"])
 
 
 @registry.register("verifier", "prompt")
@@ -291,22 +349,38 @@ class PromptVerifyStrategy(VerifyStrategy):
         from prefscope.interpret.verify import verify_single_text_features
         if codes.z_prompt is None or codes.prompts is None:
             raise ValueError("prompt verify needs a prompt lens (z_prompt) loaded with --corpus.")
+        if codes.activation_polarity == "signed" and self.pole != "positive":
+            raise ValueError(
+                "prompt verification on this legacy signed lens only validates its "
+                "positive pole; pass pole='positive' to acknowledge that limitation, "
+                "or train a batchtopk-relu prompt lens")
         o = self.opts
-        emb = np.load(o["embeddings"]) if o["embeddings"] else None
+        # Match hard controls on the OTHER learned prompt concepts, exactly as prompt
+        # naming and individual-response verification do. This space is aligned by
+        # construction and only M=256 wide for the current lens. The historical raw
+        # embedding path (D=4096) normalized the entire corpus once per feature, causing
+        # a 7.37-GiB allocation and enormous random Lustre I/O. Keep accepting the CLI's
+        # --embeddings argument for compatibility, but code-space is the safe/default
+        # similarity representation for every non-random sampler.
+        neg = o.get("negatives", "random")
+        similarity = codes.z_prompt if neg != "random" else None
         return verify_single_text_features(
-            codes.prompts, codes.z_prompt, names, client, negatives=o["negatives"],
-            embeddings=emb, n_active=o["n_per_bucket"], n_zero=o["n_per_bucket"],
+            codes.prompts, codes.z_prompt, names, client, negatives=neg,
+            embeddings=similarity,
+            n_active=o["n_per_bucket"], n_zero=o["n_per_bucket"],
             verify_frac=o["verify_frac"], seed=o["seed"],
             fidelity_threshold=o["fidelity_threshold"], concurrency=o["concurrency"],
             min_success_rate=o["min_success_rate"], min_bucket=o["min_bucket"],
             sampling=o["sampling"], n_examples=o["n_examples"],
-            instruction_ids=list(codes.instruction_ids))
+            instruction_ids=list(codes.instruction_ids), features=o["features"],
+            on_result=o["on_result"])
 
 
 def resolve_verify_mode(mode: str, input_rep: str, lens_kind: str = "completion") -> str:
-    """Pick the verifier strategy: a prompt lens -> 'prompt'; else 'auto' maps to
-    individual/pairwise off the manifest input_rep."""
-    if lens_kind == "prompt":
+    """Resolve built-in ``auto`` modes while preserving explicit custom names."""
+    if lens_kind == "prompt" and mode in {
+        "auto", "pairwise", "individual", "prompt",
+    }:
         return "prompt"
     if mode == "auto":
         return "individual" if input_rep == "individual" else "pairwise"

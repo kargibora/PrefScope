@@ -121,3 +121,41 @@ def test_from_dir_loads_projector_names_manifest(tmp_path):
     assert lens.input_rep == "difference"
     assert lens.names is not None and lens.fidelity_feature_ids == [0, 1, 2]
     assert lens.embedder is not None        # constructed lazily; no model download
+
+
+def test_from_dir_merges_bundled_and_external_annotations(tmp_path):
+    _write_synthetic_lens(tmp_path)
+    pd.DataFrame({
+        "feature_id": [0, 1, 2],
+        "concept": ["x", "x", "x"],
+        "fidelity_pass": [True, False, True],
+    }).to_csv(tmp_path / "feature_fidelity.csv", index=False)
+    external = tmp_path / "interpret"
+    external.mkdir()
+    pd.DataFrame({
+        "feature_id": [0, 1, 2],
+        "semantic_threshold": [0.2, 0.3, 0.4],
+        "presence_pass": [True, True, False],
+    }).to_csv(external / "feature_calibration.csv", index=False)
+
+    lens = LoadedLens.from_dir(tmp_path, annotations=external)
+
+    assert {"concept", "fidelity_pass", "semantic_threshold", "presence_pass"} <= \
+        set(lens.feature_table.columns)
+    assert lens.fidelity_feature_ids == [0, 2]
+    assert lens.feature_table.set_index("feature_id").loc[1, "semantic_threshold"] == 0.3
+
+
+def test_inference_only_bundle_round_trips_through_regular_loader(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_synthetic_lens(source)
+    loaded = LoadedLens.from_dir(source)
+    release = tmp_path / "release"
+
+    loaded.save(release, inference_only=True)
+    restored = LoadedLens.from_dir(release)
+
+    assert restored.projector.m_total == loaded.projector.m_total
+    assert restored.input_rep == "difference"
+    assert list(restored.concept_names) == list(loaded.concept_names)

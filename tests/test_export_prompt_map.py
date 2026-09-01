@@ -1,20 +1,19 @@
 """export_prompt_map: aligns prompt+completion lenses, orients by winner, badges Δ."""
-import sys
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT))
-from export_viewer_data import export_prompt_map  # noqa: E402
+from prefscope.viewer_export import export_prompt_map
 
 
 def _setup(tmp: Path):
     plens, clens, pint = tmp / "plens", tmp / "clens", tmp / "pint"
     for d in (plens, clens, pint):
         d.mkdir()
+    (clens / "manifest.json").write_text(json.dumps({"input_rep": "individual"}))
     ids = ["b0", "b1", "b2"]
     # b0: dom prompt feat 0; b1: dom prompt feat 1; b2: tie (dropped)
     np.save(plens / "z_prompt.npy", np.array([[2.0, 0.1], [0.1, 1.5], [1.0, 0.2]], np.float32))
@@ -57,10 +56,11 @@ def test_export_prompt_map(tmp_path):
 
 
 def test_export_prompt_map_corpus_fallback(tmp_path):
-    """Diff-lens battles often lack prompt/human_pref/model text — pull from --corpus."""
+    """Lens battles may lack prompt/human_pref/model text; pull them from --corpus."""
     plens, clens, pint = tmp_path / "plens", tmp_path / "clens", tmp_path / "pint"
     for d in (plens, clens, pint):
         d.mkdir()
+    (clens / "manifest.json").write_text(json.dumps({"input_rep": "individual"}))
     ids = ["b0", "b1", "b2"]
     np.save(plens / "z_prompt.npy", np.array([[2.0, 0.1], [0.1, 1.5], [1.0, 0.2]], np.float32))
     np.save(clens / "z_diff.npy", np.array([[1.0, 0.1], [-0.5, 0.9], [0.3, 0.3]], np.float32))
@@ -96,3 +96,11 @@ def test_export_prompt_map_all_negative_prompt_has_no_concept(tmp_path):
     assert point["pc"] == -1
     assert point["m"] == 0.0
     assert point["pf"] == []
+
+
+def test_export_prompt_map_rejects_nonlinear_direct_difference_lens(tmp_path):
+    plens, clens, pint, delta = _setup(tmp_path)
+    (clens / "manifest.json").write_text(json.dumps({"input_rep": "difference"}))
+
+    with pytest.raises(ValueError, match="cannot be reversed"):
+        export_prompt_map(plens, clens, delta, pint)

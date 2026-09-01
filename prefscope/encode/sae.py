@@ -18,6 +18,7 @@ import torch
 # "sae" registry bucket so get("sae", ...) below can resolve any built-in name.
 import prefscope.sae.model  # noqa: F401
 from prefscope.core import registry
+from prefscope.sae.model import sae_semantics
 
 # config keys whose names match an SAE __init__ parameter. Training-only params
 # (lr/batch/sparsity_coef/bandwidth/...) are NOT passed: inference doesn't need
@@ -36,11 +37,22 @@ class SAEProjector:
         # Our checkpoint is {state_dict: tensors, config: plain dict}, both of which
         # the safe unpickler handles; a checkpoint that needs arbitrary globals is
         # exactly what we want to reject.
-        ckpt = torch.load(p, map_location=device, weights_only=True)
+        # Deserialize shared artifacts on CPU first, then move the reconstructed module
+        # below. Direct ``map_location="mps"`` is not supported consistently across
+        # PyTorch releases (some call a nonexistent ``torch.mps.current_device``), and
+        # CPU-first loading also avoids allocating accelerator memory before validation.
+        ckpt = torch.load(p, map_location="cpu", weights_only=True)
         sd = ckpt["state_dict"]
         self.config = ckpt.get("config", {})
         self.device = device
         self.sae_type = self.config.get("sae_type", "batchtopk")
+        semantics = sae_semantics(self.sae_type)
+        self.activation_polarity = self.config.get(
+            "activation_polarity", semantics["activation_polarity"])
+        self.code_semantics = self.config.get(
+            "code_semantics", semantics["code_semantics"])
+        self.selection_rule = self.config.get(
+            "selection_rule", semantics["selection_rule"])
 
         # Rebuild the SAE from its checkpoint and reuse its frozen inference path.
         cls = registry.get("sae", self.sae_type)
@@ -59,6 +71,10 @@ class SAEProjector:
         # the load isn't silently dropping a *required* inference weight below.
         missing, unexpected = self._model.load_state_dict(sd, strict=False)
         required = {"encoder.weight", "decoder.weight", "input_bias", "neuron_bias"}
+        if self.sae_type == "jumprelu":
+            required.add("log_threshold")
+        elif self.sae_type in ("batchtopk", "signed-batchtopk", "batchtopk-relu"):
+            required.add("threshold")
         dropped = required & set(missing)
         if dropped:
             raise ValueError(
@@ -67,6 +83,7 @@ class SAEProjector:
 
         self.input_dim = int(W_enc.shape[1])
         self.m_total = int(W_enc.shape[0])
+        self.k = int(getattr(self._model, "k", self.config.get("k_active_neurons", 1)))
         # kept for back-compat / introspection (JumpReLU lenses expose a per-feature gate)
         self.feature_threshold = (
             self._model._thresholds().detach()
@@ -78,7 +95,10 @@ class SAEProjector:
 
     @torch.no_grad()
     def project(self, x: np.ndarray, *, batch: int = 16384) -> np.ndarray:
-        """Embeddings (N, D) -> sparse signed codes (N, M).
+        """Embeddings (N, D) -> sparse codes (N, M).
+
+        ``activation_polarity`` says whether this projector emits signed axes or
+        non-negative presences; callers must not assume one convention globally.
 
         Processed in row chunks of ``batch`` so GPU memory stays O(batch x D); the
         encoder is row-independent, so the result is identical to a single pass."""

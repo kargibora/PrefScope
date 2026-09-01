@@ -17,7 +17,8 @@ implements one method:
 ```python
 class NameStrategy(ABC):
     def __init__(self, *, features=None, n_active=12, n_zero=8, verify_frac=0.2,
-                 seed=0, abbreviate=False, concurrency=1, debug_dir=None): ...
+                 seed=0, abbreviate=False, concurrency=1, debug_dir=None,
+                 on_result=None): ...
 
     @abstractmethod
     def name(self, codes: LensCodes, client) -> pd.DataFrame:
@@ -59,7 +60,13 @@ class's `__init__` signature.
 
 If you **reuse the base `NameStrategy.__init__`**, you inherit its common knobs, all
 settable from config: `features`, `n_active`, `n_zero`, `verify_frac`, `seed`,
-`abbreviate`, `concurrency`, `debug_dir` (bundled into `self.opts`).
+`abbreviate`, `concurrency`, `debug_dir`, `negatives`, `n_candidates`, and
+`candidate_pool_factor` (bundled into `self.opts`).
+
+The CLI supplies an internal `on_result(row)` callback during resumable runs. A custom
+interpreter that performs per-feature work should call it immediately after completing
+each row. This gives custom components the same interruption safety as the built-ins;
+the callback is `None` when checkpointing is not requested.
 
 **To add your own tunable, declare it in your subclass's `__init__`** — don't edit
 any framework whitelist. List explicitly any base knob you also want to stay
@@ -75,7 +82,7 @@ class MyNamer(NameStrategy):
     def name(self, codes, client): ...
 ```
 
-See [add a verifier](add-a-verifier.md#tunables--configured-from-the-config-file)
+See [add a verifier](add-a-verifier.md#tunables-configured-from-the-config-file)
 for the same pattern explained in full.
 
 ## A minimal interpreter
@@ -101,7 +108,10 @@ class LongestResponseNamer(NameStrategy):
         for f in range(z.shape[1]):
             top = int(np.argmax(np.abs(z[:, f])))      # peak-firing item
             concept = texts[top][:40].strip() or f"feature {f}"
-            rows.append({"feature_id": f, "concept": concept})
+            row = {"feature_id": f, "concept": concept}
+            rows.append(row)
+            if self.opts["on_result"] is not None:
+                self.opts["on_result"](row)
         return pd.DataFrame(rows)
 ```
 

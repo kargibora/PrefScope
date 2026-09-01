@@ -77,10 +77,12 @@ def test_stage_specific_llm_configs_are_parsed():
         "lens_dir": "L", "out_dir": "O",
         "llm": {"model": "shared"},
         "name_llm": {"model": "namer"},
-        "verify_llm": {"model": "verifier"}})
+        "verify_llm": {"model": "verifier"},
+        "role_llm": {"model": "role-model"}})
     assert cfg.llm.model == "shared"
     assert cfg.name_llm.model == "namer"
     assert cfg.verify_llm.model == "verifier"
+    assert cfg.role_llm.model == "role-model"
     assert cfg.cluster_llm is None
 
 
@@ -116,6 +118,22 @@ def test_misspelled_interpreter_param_rejected():
 def test_misspelled_win_relevance_key_rejected():
     with pytest.raises(ValueError, match="unknown win_relevance key.*all_feature"):
         PipelineConfig.from_dict(_cfg(win_relevance={"all_feature": True}))
+
+
+def test_misspelled_role_classifier_key_rejected():
+    with pytest.raises(ValueError, match="unknown role_classifier key.*n_randm"):
+        PipelineConfig.from_dict(_cfg(role_classifier={"n_randm": 2}))
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [({"pole": "negative"}, "pole must be 'positive'"),
+     ({"all_named": "yes"}, "all_named must be a boolean"),
+     ({"features": "1,2"}, "features must be a list")],
+)
+def test_invalid_role_classifier_values_rejected(value, message):
+    with pytest.raises(ValueError, match=message):
+        PipelineConfig.from_dict(_cfg(role_classifier=value))
 
 
 def test_unknown_component_name_is_deferred_to_make():
@@ -209,13 +227,59 @@ def test_run_name_then_cluster_threads_outputs(tmp_path):
     assert (out / "feature_clusters_summary.csv").exists()
 
 
+def test_pipeline_persists_openrouter_usage_by_stage(tmp_path, monkeypatch):
+    lens, corpus = _make_lens(tmp_path, m=3)
+    out = tmp_path / "out"
+
+    class MeteredClient:
+        def __init__(self, tracker, stage):
+            self.tracker = tracker
+            self.stage = stage
+
+        def raw(self, messages, **kw):
+            msg = type("Message", (), {"content": (
+                '{"status":"ok","concept":"uses lists","confidence":"high"}')})()
+            choice = type("Choice", (), {"message": msg, "finish_reason": "stop"})()
+            response = type("Response", (), {
+                "choices": [choice], "model": "served/model", "id": "gen-test",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2,
+                          "total_tokens": 12, "cost": 0.001}})()
+            self.tracker.record_response(
+                response, requested_model="requested/model", backend="openai",
+                stage=self.stage, attempt=1, accepted=True)
+            return msg.content
+
+        def usage_progress(self):
+            return self.tracker.progress()
+
+    def make_metered(self, *, usage_tracker=None, usage_stage="llm"):
+        return MeteredClient(usage_tracker, usage_stage)
+
+    monkeypatch.setattr(LLMConfig, "client", make_metered)
+    cfg = PipelineConfig.from_dict({
+        "lens_dir": str(lens), "out_dir": str(out), "corpus": str(corpus),
+        "stages": ["name"]})
+    outputs = run_pipeline(cfg, verbose=False)
+
+    assert set(outputs) == {"name"}
+    usage = json.loads((out / "llm_usage.json").read_text())
+    assert usage["total"]["responses"] == 3
+    assert usage["total"]["prompt_tokens"] == 30
+    assert usage["total"]["completion_tokens"] == 6
+    assert usage["total"]["cost_credits"] == pytest.approx(0.003)
+    assert usage["stages"]["name"]["responses"] == 3
+    assert usage["models"]["served/model"]["responses"] == 3
+    assert len((out / "llm_usage.jsonl").read_text().splitlines()) == 3
+
+
 def test_single_response_lens_names_and_clusters_without_external_corpus(tmp_path):
     lens = _make_single_lens(tmp_path)
     out = tmp_path / "out"
     cfg = PipelineConfig.from_dict({
         "lens_dir": str(lens), "out_dir": str(out),
         "stages": ["name", "cluster"],
-        "interpreter": {"name": "auto", "n_active": 3, "n_zero": 3},
+        "interpreter": {"name": "auto", "n_active": 3, "n_zero": 3,
+                        "pole": "positive"},
         "clusterer": {"name": "spherical-kmeans", "n_clusters": 2}})
     outputs = run_pipeline(cfg, client=FakeClient(), verbose=False)
     assert set(outputs) == {"name", "cluster"}
@@ -229,6 +293,50 @@ def test_single_response_lens_rejects_pairwise_win_relevance(tmp_path):
         "lens_dir": str(lens), "out_dir": str(tmp_path / "out"),
         "stages": ["win-relevance"]})
     with pytest.raises(ValueError, match="pairwise-only"):
+        run_pipeline(cfg, client=FakeClient(), verbose=False)
+
+
+def test_single_response_role_stage_filters_verified_names(tmp_path, monkeypatch):
+    lens = _make_single_lens(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    pd.DataFrame({
+        "feature_id": [0, 1, 2],
+        "concept": ["uses headings", "topic: biology", "unverified"],
+        "fidelity_pass": [True, True, False],
+    }).to_csv(out / "feature_fidelity.csv", index=False)
+    seen = {}
+
+    def spy(battles, z_a, z_b, names, client, **kwargs):
+        seen["ids"] = names["feature_id"].tolist()
+        seen["n_top"] = kwargs["n_top"]
+        return pd.DataFrame({
+            "feature_id": names["feature_id"],
+            "concept": names["concept"],
+            "semantic_role": ["presentation", "topic_content"],
+            "behavior_scope": ["context_conditional_behavior", "prompt_content"],
+        })
+
+    monkeypatch.setattr("prefscope.interpret.role.classify_response_roles", spy)
+    cfg = PipelineConfig.from_dict({
+        "lens_dir": str(lens), "out_dir": str(out),
+        "stages": ["classify-role"],
+        "role_classifier": {"n_top": 5, "n_random": 1, "pole": "positive"},
+    })
+    outputs = run_pipeline(cfg, client=FakeClient(), verbose=False)
+
+    assert seen == {"ids": [0, 1], "n_top": 5}
+    assert outputs["classify-role"].name == "feature_roles.csv"
+    assert len(pd.read_csv(outputs["classify-role"])) == 2
+
+
+def test_role_stage_rejects_difference_lens(tmp_path):
+    lens, corpus = _make_lens(tmp_path)
+    cfg = PipelineConfig.from_dict({
+        "lens_dir": str(lens), "out_dir": str(tmp_path / "out"),
+        "corpus": str(corpus), "stages": ["classify-role"],
+    })
+    with pytest.raises(ValueError, match="individual completion lens"):
         run_pipeline(cfg, client=FakeClient(), verbose=False)
 
 
@@ -390,6 +498,7 @@ def test_prompt_lens_name_and_cluster_uses_prompt_artifacts(tmp_path):
     cfg = PipelineConfig.from_dict({
         "lens_dir": str(lens), "out_dir": str(out), "corpus": str(corpus),
         "lens_kind": "prompt", "stages": ["name", "cluster"],
+        "interpreter": {"name": "auto", "pole": "positive"},
         "clusterer": {"name": "spherical-kmeans", "n_clusters": 2}})
     outputs = run_pipeline(cfg, client=FakePromptClient(), verbose=False)
 
@@ -417,7 +526,8 @@ def test_prompt_lens_verify_routes_prompt_strategy(tmp_path, monkeypatch):
     monkeypatch.setattr("prefscope.interpret.verify.verify_single_text_features", spy)
     cfg = PipelineConfig.from_dict({
         "lens_dir": str(lens), "out_dir": str(out), "corpus": str(corpus),
-        "lens_kind": "prompt", "stages": ["verify"]})   # auto verifier -> prompt strategy
+        "lens_kind": "prompt", "stages": ["verify"],
+        "verifier": {"name": "auto", "pole": "positive"}})
     outputs = run_pipeline(cfg, client=FakePromptClient(), verbose=False)
 
     assert seen["n_names"] == 2                          # threaded the prompt names csv

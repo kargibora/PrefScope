@@ -8,10 +8,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from prefscope.analysis.presence import annotation_flag
+from prefscope.artifacts import MODEL_FEATURE_CONTEXT
 
-def _absolute_fire_rate(lens: Path, models, feats):
-    """Per-model ABSOLUTE prevalence ``P(z_self > 0)``: the fraction of a model's OWN
-    responses that express each feature's positive pole.
+from .presence import semantic_presence
+
+
+def _absolute_fire_rate(lens: Path, models, feats, features: pd.DataFrame):
+    """Per-model absolute semantic-presence prevalence for a model's own responses.
 
     Read from the lens's **per-side absolute** codes ``z_a``/``z_b`` (``z_a = f(e_a)``,
     ``z_b = f(e_b)``) — the honest "did this model's answer express f" signal. The oriented
@@ -34,8 +38,8 @@ def _absolute_fire_rate(lens: Path, models, feats):
     if len(battles) != len(z_a) or len(battles) != len(z_b):
         return None
     feats = [int(f) for f in feats]
-    pa = np.asarray(z_a[:, feats]) > 0                   # (N, F) A's answer expresses f (+pole)
-    pb = np.asarray(z_b[:, feats]) > 0
+    pa, calibrated = semantic_presence(z_a, feats, features)
+    pb, _ = semantic_presence(z_b, feats, features)
     ma = battles["model_a"].to_numpy()
     mb = battles["model_b"].to_numpy()
     out = {}
@@ -46,7 +50,7 @@ def _absolute_fire_rate(lens: Path, models, feats):
         if (mb == m).any():
             rows.append(pb[mb == m])                      # m's answers where it was model_b
         out[m] = np.vstack(rows).mean(axis=0) if rows else np.full(len(feats), np.nan)
-    return out
+    return out, calibrated
 
 
 def export_diagnosis(lens: Path, features: pd.DataFrame, min_battles=20, *,
@@ -64,7 +68,7 @@ def export_diagnosis(lens: Path, features: pd.DataFrame, min_battles=20, *,
     from prefscope.pipeline.oriented_bank import load_bank
     Z, meta, _ = load_bank(bank)
 
-    feats = features.loc[features.get("fidelity_pass", False) == True, "feature_id"] \
+    feats = features.loc[features["fidelity_pass"].map(annotation_flag), "feature_id"] \
         if "fidelity_pass" in features else features["feature_id"]
     feats = feats.astype(int).tolist()
     cols = Z[:, feats]                                  # (2N, F)
@@ -89,12 +93,35 @@ def export_diagnosis(lens: Path, features: pd.DataFrame, min_battles=20, *,
     else:
         resp_names = {}
 
+    # For calibrated individual features, a response concept is present only above its
+    # learned semantic threshold. Build the oriented A/B difference from that discrete
+    # presence. This prevents weak nonzero codes from becoming model behaviours merely
+    # because the SAE selected them in its top-k. Uncalibrated axes retain the bank path.
+    calibrated = np.zeros(len(feats), dtype=bool)
+    za_p, zb_p, battles_p = lens / "z_a.npy", lens / "z_b.npy", lens / "battles.parquet"
+    if za_p.exists() and zb_p.exists() and battles_p.exists():
+        side_battles = pd.read_parquet(battles_p)
+        z_a = np.load(za_p, mmap_mode="r")
+        z_b = np.load(zb_p, mmap_mode="r")
+        standard_bank = (len(meta) == 2 * len(side_battles) and len(z_a) == len(side_battles)
+                         and len(z_b) == len(side_battles) and "orientation" in meta.columns
+                         and meta["orientation"].iloc[:len(side_battles)].eq("a").all()
+                         and meta["orientation"].iloc[len(side_battles):].eq("b").all())
+        if standard_bank:
+            pa, calibrated = semantic_presence(z_a, feats, features)
+            pb, _ = semantic_presence(z_b, feats, features)
+            discrete = np.vstack((pa.astype(np.int8) - pb.astype(np.int8),
+                                  pb.astype(np.int8) - pa.astype(np.int8)))
+            if calibrated.any():
+                cols = np.asarray(cols).copy()
+                cols[:, calibrated] = discrete[:, calibrated]
     pos = (cols > 0).astype(np.int64)
     neg = (cols < 0).astype(np.int64)
     g = pd.DataFrame(pos, columns=[f"p{f}" for f in feats])
     g["self_model"] = sm
     gp = g.groupby("self_model").sum()
-    gn = pd.DataFrame(neg, columns=[f"p{f}" for f in feats]); gn["self_model"] = sm
+    gn = pd.DataFrame(neg, columns=[f"p{f}" for f in feats])
+    gn["self_model"] = sm
     gn = gn.groupby("self_model").sum()
     cnt = pd.Series(sm).value_counts()
 
@@ -102,13 +129,26 @@ def export_diagnosis(lens: Path, features: pd.DataFrame, min_battles=20, *,
     # ABSOLUTE per-model prevalence P(z_self>0) for the "Does a lot" panel, from per-side
     # codes. None on a difference lens -> fall back to the bank's contrast disagreement rate
     # and label it honestly via fire_rate_kind so the viewer doesn't imply prevalence (#1).
-    abs_fire = _absolute_fire_rate(lens, keep_models, feats)
+    abs_result = _absolute_fire_rate(lens, keep_models, feats, features)
+    abs_fire = abs_result[0] if abs_result is not None else None
+    abs_calibrated = abs_result[1] if abs_result is not None else calibrated
     fire_rate_kind = "absolute" if abs_fire is not None else "contrast"
     tot = len(sm)
     tot_pos = pos.sum(axis=0).astype(float)             # (F,)
     tot_neg = neg.sum(axis=0).astype(float)
 
     win_rate = pd.Series(win).groupby(sm).mean()
+    model_context_path = lens / MODEL_FEATURE_CONTEXT
+    model_context = (pd.read_parquet(model_context_path)
+                     if model_context_path.exists() else None)
+    context_lookup = {}
+    if model_context is not None and {"model", "feature_id"} <= set(model_context.columns):
+        context_lookup = {(str(r.model), int(r.feature_id)): r
+                          for r in model_context.itertuples()}
+    static_categories = ({int(r.feature_id): str(r.behavior_category)
+                          for r in features.dropna(subset=["behavior_category"]).itertuples()}
+                         if "behavior_category" in features.columns else {})
+    has_context_evidence = model_context is not None or bool(static_categories)
     rows = {}
     for m in keep_models:
         n = int(cnt[m])
@@ -147,7 +187,20 @@ def export_diagnosis(lens: Path, features: pd.DataFrame, min_battles=20, *,
                               "n": int(r["n"])} for _, r in rl.iterrows()]
             except Exception as e:
                 print(f"  (relations skipped for {m}: {e})", file=sys.stderr)
-        rows[m] = {
+        category, stable, context_q = [], [], []
+        for f in feats:
+            cr = context_lookup.get((str(m), int(f)))
+            # A feature-level category can identify prompt/content, but "general tendency"
+            # is a model-level claim and requires this model's cross-context row. Missing
+            # model evidence therefore fails closed instead of inheriting "general".
+            static = static_categories.get(int(f), "unclassified")
+            fallback = "prompt_content" if static == "prompt_content" else "unclassified"
+            category.append(str(getattr(cr, "behavior_category", None) or fallback))
+            stable.append(annotation_flag(
+                getattr(cr, "cross_context_stable", False)))
+            qv = getattr(cr, "q_value", np.nan)
+            context_q.append(None if pd.isna(qv) else round(float(qv), 6))
+        model_row = {
             "win_rate": float(win_rate.get(m, np.nan)),
             "n_battles": n,
             "net_direction": [round(float(v), 5) for v in nd_model],
@@ -161,12 +214,21 @@ def export_diagnosis(lens: Path, features: pd.DataFrame, min_battles=20, *,
             "prompt_types": prompt_types,
             "relations": relations,
         }
+        if has_context_evidence:
+            model_row.update({
+                "behavior_category": category,
+                "cross_context_stable": stable,
+                "context_q_value": context_q,
+            })
+        rows[m] = model_row
     concepts = (features.set_index("feature_id").reindex(feats)["concept"].tolist()
                 if "concept" in features else [str(f) for f in feats])
     return {"features": feats, "concepts": concepts, "models": keep_models, "rows": rows,
             # "absolute" = fire_rate is P(z_self>0) prevalence; "contrast" = it's the bank
             # disagreement rate (difference lens) and the viewer must label it distinctly (#1).
             "fire_rate_kind": fire_rate_kind,
+            "presence_basis": ["semantic_threshold" if bool(v) else "positive_nonzero"
+                               for v in abs_calibrated],
             # pool totals over ALL battles (incl. each model's own — client subtracts):
             # pool_pos_f = tot_pos[f] - fire_pos[f], pool_n = n_total - n_battles.
             "tot_pos": [int(v) for v in tot_pos], "tot_neg": [int(v) for v in tot_neg],
@@ -183,7 +245,8 @@ def export_head_to_head(lens: Path, features: pd.DataFrame, diag: dict | None,
         bpos_f = # shared battles where f fires in A's answer but NOT in B's
         cpos_f = # shared battles where f fires in B's answer but NOT in A's
 
-    "fires" == the per-response code is nonzero, read from the lens's **per-side absolute**
+    "fires" uses a semantic threshold when calibrated and the explicitly marked positive-
+    nonzero fallback otherwise, read from the lens's **per-side absolute**
     codes ``z_a``/``z_b`` (``z_a = f(e_a)``, ``z_b = f(e_b)``) — NOT the oriented bank. The
     bank stores contrast codes (``z_a-z_b`` and ``z_b-z_a``), which are sign flips with the
     *same* nonzero mask on both sides, so a discordant count off the bank is always zero.
@@ -217,10 +280,10 @@ def export_head_to_head(lens: Path, features: pd.DataFrame, diag: dict | None,
     if len(battles) != len(z_a) or len(battles) != len(z_b):
         return None                                     # misaligned dump — refuse silently
 
-    # > 0 (not != 0): a signed BatchTopK feature's negative pole is the OPPOSITE concept,
-    # so counting it as "expressed f" would let head-to-head tally "opposite of X" as X (#2).
-    fa = np.asarray(z_a[:, feats]) > 0                  # (N, F) A's answer expresses f (+pole)
-    fb = np.asarray(z_b[:, feats]) > 0                  # (N, F) B's answer expresses f (+pole)
+    # Use learned semantic thresholds when present; otherwise retain the explicitly marked
+    # positive-nonzero fallback for older bundles.
+    fa, calibrated = semantic_presence(z_a, feats, features)
+    fb, _ = semantic_presence(z_b, feats, features)
     ma = battles["model_a"].to_numpy()
     mb = battles["model_b"].to_numpy()
 
@@ -264,4 +327,6 @@ def export_head_to_head(lens: Path, features: pd.DataFrame, diag: dict | None,
                       "cpos": [int(x) for x in cpos[p]]})
     return {"models": models, "features": feats,
             "concepts": [None if pd.isna(c) else str(c) for c in concepts],
+            "presence_basis": ["semantic_threshold" if bool(v) else "positive_nonzero"
+                               for v in calibrated],
             "min_shared": int(min_shared), "pairs": pairs}

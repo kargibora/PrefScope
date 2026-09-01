@@ -11,11 +11,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from prefscope.artifacts import Z_A, Z_DIFF
 from prefscope.data.ingest import load_battles
 
 
 def load_lens_battles(lens_dir, annotations=None, *, corpus=None):
-    """Return (battles_df, z_diff, manifest), battles row-aligned to z_diff.
+    """Return (battles_df, codes, manifest), battles row-aligned to the codes.
+
+    Codes are the lens's paired contrast (``z_diff.npy``) when present, otherwise the
+    single-response codes (``z_a.npy``).
 
     Re-attach the prompts/completions from whichever source the lens was built
     from: an OpenJury annotation JSON (``annotations``) or a merged battle
@@ -24,7 +28,13 @@ def load_lens_battles(lens_dir, annotations=None, *, corpus=None):
     if bool(annotations) == bool(corpus):
         raise ValueError("provide exactly one of annotations or corpus")
     lens_dir = Path(lens_dir)
-    z_diff = np.load(lens_dir / "z_diff.npy")
+    # Interpretation reads a handful of feature columns at a time.  Memory-map large
+    # code matrices so a one-feature naming run does not materialize multi-GB artifacts.
+    code_path = next(
+        (lens_dir / name for name in (Z_DIFF, Z_A) if (lens_dir / name).exists()), None)
+    if code_path is None:
+        raise FileNotFoundError(f"{lens_dir} has neither {Z_DIFF} nor {Z_A}")
+    z_diff = np.load(code_path, mmap_mode="r")
     manifest = json.loads((lens_dir / "manifest.json").read_text())
     lens_meta = pd.read_parquet(lens_dir / "battles.parquet")
     order = lens_meta["instruction_id"].astype(str).tolist()

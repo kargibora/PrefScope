@@ -1,7 +1,7 @@
 """Config-driven pipeline runner — declare every component + its params in one file.
 
 ``prefscope run --config pipeline.yaml`` runs the per-lens analysis chain
-(``name → verify → cluster → win-relevance``) where each stage's component is resolved
+(``name → verify → classify-role → cluster → win-relevance``) where each stage's component is resolved
 by name through the registry. The config is the declarative front-end over the same
 swappable components the subcommands use, so changing a verifier or clustering algorithm
 is a one-line edit:
@@ -9,16 +9,18 @@ is a one-line edit:
     lens_dir: lenses/indiv_8b
     corpus:   corpora/arena.parquet        # needed by win-relevance; optional otherwise
     out_dir:  results/run1
-    stages: [name, verify, cluster, win-relevance]
+    stages: [name, verify, classify-role, cluster, win-relevance]
     llm: {backend: openai, model: deepseek/deepseek-v3.2}
     interpreter: {name: auto, n_active: 12}
     verifier:    {name: auto, n_per_bucket: 12}
+    role_classifier: {n_top: 6, n_random: 2}
     clusterer:   {name: mi-leiden, resolution: 1.2, knn: 6}
 
 Outputs are written under ``out_dir`` with the canonical artifact names and threaded
 forward (``verify`` reads ``name``'s csv; ``cluster``/``win-relevance`` read the
-fidelity csv). Only ``lens_kind: completion`` is supported here — point prompt lenses at
-the dedicated ``interpret``/``cluster-features`` subcommands.
+fidelity csv). Prompt lenses support ``name``, ``verify``, and ``cluster``. Role
+classification and preference relevance are completion-only; role classification also
+requires an individual-response lens.
 """
 from __future__ import annotations
 
@@ -27,24 +29,36 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
-import prefscope.adapters  # noqa: F401  — registers all built-in components
+from prefscope.analysis.presence import annotation_flag
+
+# Register only the lightweight built-ins used by this runner. SAE and dataset plug-ins
+# remain lazy so importing the config runner does not import torch.
+from prefscope.pipeline import cluster as _clusterers  # noqa: F401
 from prefscope.artifacts import (
-    FEATURE_CLUSTERS, FEATURE_FIDELITY, FEATURE_NAMES, MANIFEST, PROMPT_FEATURE_CLUSTERS,
-    PROMPT_FEATURE_FIDELITY, PROMPT_FEATURE_NAMES, WIN_RELEVANCE)
+    FEATURE_CLUSTERS, FEATURE_FIDELITY, FEATURE_NAMES, FEATURE_ROLES, LLM_USAGE,
+    LLM_USAGE_EVENTS, MANIFEST, PROMPT_FEATURE_CLUSTERS, PROMPT_FEATURE_FIDELITY,
+    PROMPT_FEATURE_NAMES, WIN_RELEVANCE)
 from prefscope.core import registry
-from prefscope.interpret.llm import DEFAULT_API_BASE, DEFAULT_MODEL, LLMClient
+from prefscope.core.plugins import load_plugins, normalize_plugin_modules
+from prefscope.interpret.llm import DEFAULT_API_BASE, DEFAULT_MODEL, LLMClient, UsageTracker
 from prefscope.interpret.strategy import (
-    LensCodes, VerifyCodes, resolve_name_mode, resolve_verify_mode)
+    LensCodes,
+    NameStrategy,
+    VerifyCodes,
+    VerifyStrategy,
+    resolve_name_mode,
+    resolve_verify_mode,
+)
 
 # Stage -> output filename, per lens kind. A completion lens runs the full chain; a prompt
-# lens runs name/verify/cluster over z_prompt (win-relevance is a completion-only notion —
-# it scores which response features humans reward).
+# lens runs name/verify/cluster over z_prompt (win-relevance is completion-only because
+# it measures associations between response features and observed preferences).
 _COMPLETION_OUTPUTS = {
     "name": FEATURE_NAMES,
     "verify": FEATURE_FIDELITY,
+    "classify-role": FEATURE_ROLES,
     "cluster": FEATURE_CLUSTERS,
     "win-relevance": WIN_RELEVANCE,
 }
@@ -53,7 +67,9 @@ _PROMPT_OUTPUTS = {
     "verify": PROMPT_FEATURE_FIDELITY,
     "cluster": PROMPT_FEATURE_CLUSTERS,
 }
-KNOWN_STAGES = ("name", "verify", "cluster", "win-relevance")
+KNOWN_STAGES = ("name", "verify", "classify-role", "cluster", "win-relevance")
+DEFAULT_COMPLETION_STAGES = ("name", "verify", "cluster", "win-relevance")
+DEFAULT_PROMPT_STAGES = ("name", "verify", "cluster")
 
 
 def _stage_outputs(lens_kind: str) -> dict:
@@ -101,14 +117,20 @@ class LLMConfig:
                 f"allowed: {', '.join(cls._KEYS)}")
         return cls(**d)
 
-    def client(self) -> LLMClient:
+    def client(self, *, usage_tracker: UsageTracker | None = None,
+               usage_stage: str = "llm") -> LLMClient:
         return LLMClient(backend=self.backend, model=self.model,
-                         api_base=self.api_base, api_key_env=self.api_key_env)
+                         api_base=self.api_base, api_key_env=self.api_key_env,
+                         usage_tracker=usage_tracker, usage_stage=usage_stage)
 
 
 # Cluster-stage keys that steer the runner, not the clusterer constructor (popped before make).
 _CLUSTER_CONTROL = ("cluster_on", "fidelity_only", "name_clusters", "concurrency")
-_WIN_RELEVANCE_KEYS = ("all_features",)
+_WIN_RELEVANCE_KEYS = ("all_features", "group_col")
+_ROLE_CLASSIFIER_KEYS = (
+    "linkage", "all_named", "features", "pole", "n_top", "n_random", "batch_size",
+    "min_valid_examples", "seed", "concurrency",
+)
 
 
 def _accepted_params(kind: str, name: str) -> set | None:
@@ -117,19 +139,18 @@ def _accepted_params(kind: str, name: str) -> set | None:
     Validated against this so a misspelled or wrong-component param (e.g. ``n_clusters``
     on ``mi-leiden``, which only the k-means clusterers take) is rejected up front rather
     than silently swallowed by a ``**kwargs`` catch-all. ``auto`` shares the base
-    ``__init__`` across the concrete strategies, so any registered name gives the same set.
+    ``__init__`` across the concrete strategies, so its base strategy defines the set.
     Returns ``None`` when the name can't be resolved — ``registry.make`` then raises the
     friendly "no such component" error instead."""
-    resolved = name
     if name == "auto":
-        avail = registry.available(kind)
-        if not avail:
+        cls = {"interpreter": NameStrategy, "verifier": VerifyStrategy}.get(kind)
+        if cls is None:
             return None
-        resolved = avail[0]
-    try:
-        cls = registry.get(kind, resolved)
-    except KeyError:
-        return None
+    else:
+        try:
+            cls = registry.get(kind, name)
+        except KeyError:
+            return None
     return {p.name for p in inspect.signature(cls.__init__).parameters.values()
             if p.name != "self" and p.kind not in (p.VAR_KEYWORD, p.VAR_POSITIONAL)}
 
@@ -147,8 +168,10 @@ def _check_params(kind: str, sc: "StageConfig", *, extra=()) -> None:
 
 
 _TOP_KEYS = {"lens_dir", "out_dir", "stages", "corpus", "annotations", "lens_kind",
-             "llm", "name_llm", "verify_llm", "cluster_llm",
-             "interpreter", "verifier", "clusterer", "win_relevance"}
+             "plugins",
+             "llm", "name_llm", "verify_llm", "role_llm", "cluster_llm",
+             "interpreter", "verifier", "role_classifier", "clusterer",
+             "win_relevance"}
 
 
 @dataclass
@@ -156,18 +179,21 @@ class PipelineConfig:
     """Typed, validated view of a pipeline config file."""
     lens_dir: str
     out_dir: str
-    stages: list = field(default_factory=lambda: list(KNOWN_STAGES))
+    stages: list = field(default_factory=lambda: list(DEFAULT_COMPLETION_STAGES))
     corpus: str | None = None
     annotations: list | None = None
     lens_kind: str = "completion"
     llm: LLMConfig = field(default_factory=LLMConfig)
     name_llm: LLMConfig | None = None
     verify_llm: LLMConfig | None = None
+    role_llm: LLMConfig | None = None
     cluster_llm: LLMConfig | None = None
     interpreter: StageConfig = field(default_factory=StageConfig)
     verifier: StageConfig = field(default_factory=StageConfig)
+    role_classifier: dict = field(default_factory=dict)
     clusterer: StageConfig = field(default_factory=lambda: StageConfig("spherical-kmeans"))
     win_relevance: dict = field(default_factory=dict)
+    plugins: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict) -> "PipelineConfig":
@@ -182,13 +208,17 @@ class PipelineConfig:
             if not d.get(req):
                 raise ValueError(f"config missing required key: {req!r}")
 
+        plugins = normalize_plugin_modules(d.get("plugins"))
+
         lens_kind = d.get("lens_kind", "completion")
         if lens_kind not in ("completion", "prompt"):
             raise ValueError(
                 f"lens_kind must be 'completion' or 'prompt', got {lens_kind!r}")
 
         outputs = _stage_outputs(lens_kind)
-        stages = list(d.get("stages") or outputs)
+        default_stages = (DEFAULT_PROMPT_STAGES if lens_kind == "prompt"
+                          else DEFAULT_COMPLETION_STAGES)
+        stages = list(d.get("stages") or default_stages)
         bad = [s for s in stages if s not in outputs]
         if bad:
             why = (" (win-relevance is completion-only)"
@@ -204,9 +234,21 @@ class PipelineConfig:
         interpreter = StageConfig.parse(d.get("interpreter"))
         verifier = StageConfig.parse(d.get("verifier"))
         clusterer = StageConfig.parse(d.get("clusterer"), default="spherical-kmeans")
-        _check_params("interpreter", interpreter)
-        _check_params("verifier", verifier)
-        _check_params("clusterer", clusterer, extra=_CLUSTER_CONTROL)
+
+        role_classifier = dict(d.get("role_classifier") or {})
+        unknown_role = set(role_classifier) - set(_ROLE_CLASSIFIER_KEYS)
+        if unknown_role:
+            raise ValueError(
+                f"unknown role_classifier key(s): {', '.join(sorted(unknown_role))}; "
+                f"allowed: {', '.join(_ROLE_CLASSIFIER_KEYS)}")
+        if role_classifier.get("pole") not in (None, "positive"):
+            raise ValueError("role_classifier.pole must be 'positive' when set")
+        if "all_named" in role_classifier and not isinstance(
+                role_classifier["all_named"], bool):
+            raise ValueError("role_classifier.all_named must be a boolean")
+        if "features" in role_classifier and not isinstance(
+                role_classifier["features"], (list, tuple)):
+            raise ValueError("role_classifier.features must be a list of feature IDs")
 
         win_relevance = dict(d.get("win_relevance") or {})
         unknown_wr = set(win_relevance) - set(_WIN_RELEVANCE_KEYS)
@@ -215,17 +257,30 @@ class PipelineConfig:
                 f"unknown win_relevance key(s): {', '.join(sorted(unknown_wr))}; "
                 f"allowed: {', '.join(_WIN_RELEVANCE_KEYS)}")
 
+        llm = LLMConfig.parse(d.get("llm"))
+        name_llm = LLMConfig.parse(d["name_llm"]) if d.get("name_llm") is not None else None
+        verify_llm = (
+            LLMConfig.parse(d["verify_llm"])
+            if d.get("verify_llm") is not None else None)
+        role_llm = LLMConfig.parse(d["role_llm"]) if d.get("role_llm") is not None else None
+        cluster_llm = (
+            LLMConfig.parse(d["cluster_llm"])
+            if d.get("cluster_llm") is not None else None)
+
+        # Import trusted extension code only after all registry-independent config
+        # validation has succeeded.
+        load_plugins(plugins)
+        _check_params("interpreter", interpreter)
+        _check_params("verifier", verifier)
+        _check_params("clusterer", clusterer, extra=_CLUSTER_CONTROL)
+
         return cls(
             lens_dir=d["lens_dir"], out_dir=d["out_dir"], stages=stages,
             corpus=d.get("corpus"), annotations=annotations, lens_kind=lens_kind,
-            llm=LLMConfig.parse(d.get("llm")),
-            name_llm=(LLMConfig.parse(d["name_llm"]) if d.get("name_llm") is not None
-                      else None),
-            verify_llm=(LLMConfig.parse(d["verify_llm"]) if d.get("verify_llm") is not None
-                        else None),
-            cluster_llm=(LLMConfig.parse(d["cluster_llm"]) if d.get("cluster_llm") is not None
-                         else None),
-            interpreter=interpreter, verifier=verifier, clusterer=clusterer,
+            plugins=plugins, llm=llm, name_llm=name_llm, verify_llm=verify_llm,
+            role_llm=role_llm, cluster_llm=cluster_llm,
+            interpreter=interpreter, verifier=verifier, role_classifier=role_classifier,
+            clusterer=clusterer,
             win_relevance=win_relevance)
 
     @classmethod
@@ -249,7 +304,9 @@ def _fidelity_features(names: pd.DataFrame | None, *, restrict: bool) -> list | 
     """Feature ids to keep: fidelity-passing ones when a fidelity csv is threaded in."""
     if names is None or not restrict or "fidelity_pass" not in names.columns:
         return None
-    return names.loc[names["fidelity_pass"].astype(bool), "feature_id"].astype(int).tolist()
+    return names.loc[
+        names["fidelity_pass"].map(annotation_flag), "feature_id"
+    ].astype(int).tolist()
 
 
 def preflight(cfg: PipelineConfig) -> None:
@@ -259,6 +316,12 @@ def preflight(cfg: PipelineConfig) -> None:
         raise FileNotFoundError(f"no lens at {cfg.lens_dir!r} (missing {MANIFEST})")
     manifest = json.loads((Path(cfg.lens_dir) / MANIFEST).read_text())
     single = cfg.lens_kind == "completion" and manifest.get("dataset_mode") == "single"
+    if "classify-role" in cfg.stages:
+        if manifest.get("input_rep") != "individual":
+            raise ValueError("classify-role needs an individual completion lens")
+        linkage = cfg.role_classifier.get("linkage")
+        if linkage and not Path(linkage).exists():
+            raise FileNotFoundError(f"role-classifier linkage not found: {linkage!r}")
     if cfg.lens_kind == "prompt":
         # prompt naming/verify map prompt text from the corpus (cluster reads z_prompt only).
         if any(s in cfg.stages for s in ("name", "verify")) and not cfg.corpus:
@@ -269,8 +332,9 @@ def preflight(cfg: PipelineConfig) -> None:
             raise ValueError(
                 "win-relevance is pairwise-only; remove it from stages for a "
                 "single-response lens")
-        # name/verify re-attach text; win-relevance needs human_pref — all need a battle source.
-        text_stages = [s for s in cfg.stages if s in ("name", "verify", "win-relevance")]
+        # These stages re-attach text; win-relevance additionally needs human_pref.
+        text_stages = [s for s in cfg.stages
+                       if s in ("name", "verify", "classify-role", "win-relevance")]
         if text_stages and not single:
             if bool(cfg.annotations) == bool(cfg.corpus):
                 raise ValueError(
@@ -294,6 +358,8 @@ def run_pipeline(cfg: PipelineConfig, *, client=None, verbose: bool = True) -> d
     outmap = _stage_outputs(cfg.lens_kind)            # stage -> filename, per lens kind
     outputs: dict[str, Path] = {}
     _client_boxes: dict[str, object] = {}
+    usage_tracker = (None if client is not None
+                     else UsageTracker(out_dir / LLM_USAGE_EVENTS))
 
     def log(msg: str) -> None:
         if verbose:
@@ -303,10 +369,13 @@ def run_pipeline(cfg: PipelineConfig, *, client=None, verbose: bool = True) -> d
         if client is not None:
             return client
         override = getattr(cfg, f"{role}_llm")
-        key = role if override is not None else "shared"
-        if key not in _client_boxes:
-            _client_boxes[key] = (override or cfg.llm).client()
-        return _client_boxes[key]
+        # Keep one client per role even when the configuration is shared so every
+        # request carries the correct name/verify/cluster stage in the usage ledger.
+        if role not in _client_boxes:
+            _client_boxes[role] = (override or cfg.llm).client(
+                usage_tracker=usage_tracker,
+                usage_stage="classify-role" if role == "role" else role)
+        return _client_boxes[role]
 
     def names_csv(stage: str) -> Path:
         """Path produced by an upstream stage, or the on-disk default if it didn't run."""
@@ -351,6 +420,10 @@ def run_pipeline(cfg: PipelineConfig, *, client=None, verbose: bool = True) -> d
             log(f"[verify] {mode}: {int(df['fidelity_pass'].sum())}/{len(df)} pass "
                 f"-> {outputs[stage]}")
 
+        elif stage == "classify-role":
+            outputs[stage] = _run_role_classification(
+                cfg, out_dir, best_names_path(), get_client("role"), log, outmap)
+
         elif stage == "cluster":
             outputs[stage] = _run_cluster(
                 cfg, out_dir, best_names_path(), lambda: get_client("cluster"),
@@ -360,12 +433,83 @@ def run_pipeline(cfg: PipelineConfig, *, client=None, verbose: bool = True) -> d
             outputs[stage] = _run_win_relevance(cfg, out_dir, best_names_path(),
                                                 outputs.get("cluster"), log, outmap)
 
+        # Keep a human-readable checkpoint current after every completed LLM stage.
+        # The JSONL ledger is appended per response and therefore also survives a
+        # mid-stage interruption.
+        if usage_tracker is not None and _client_boxes:
+            usage_tracker.write_summary(out_dir / LLM_USAGE)
+
+    if usage_tracker is not None and _client_boxes:
+        usage_path = usage_tracker.write_summary(out_dir / LLM_USAGE)
+        log(f"[llm-usage] {usage_tracker.progress()} -> {usage_path}")
     return outputs
+
+
+def _run_role_classification(cfg, out_dir, names_path, client, log, outmap) -> Path:
+    """Classify verified individual-response concepts using prompt/response evidence."""
+    from prefscope.interpret.role import classify_response_roles
+
+    if names_path is None:
+        raise FileNotFoundError(
+            "classify-role needs feature names; run name/verify first or place "
+            f"{FEATURE_FIDELITY} in {out_dir}")
+    codes = VerifyCodes.load(
+        cfg.lens_dir, cfg.annotations, corpus=cfg.corpus, lens_kind="completion"
+    )
+    if codes.input_rep != "individual" or codes.z_a is None:
+        raise ValueError("classify-role needs an individual completion lens")
+
+    params = dict(cfg.role_classifier)
+    pole = params.pop("pole", None)
+    if codes.activation_polarity == "signed" and pole != "positive":
+        raise ValueError(
+            "signed lenses require role_classifier.pole: positive for classify-role")
+    all_named = bool(params.pop("all_named", False))
+    requested = params.pop("features", None)
+    linkage_path = params.pop("linkage", None)
+
+    names = pd.read_csv(names_path)
+    if not {"feature_id", "concept"} <= set(names.columns):
+        raise ValueError("classify-role names need feature_id and concept columns")
+    names["feature_id"] = pd.to_numeric(names["feature_id"], errors="raise").astype(int)
+    if not all_named:
+        if "fidelity_pass" not in names.columns:
+            raise ValueError(
+                "classify-role needs fidelity results by default; run verify first or set "
+                "role_classifier.all_named: true")
+        names = names[names["fidelity_pass"].map(annotation_flag)].copy()
+
+    available = set(names["feature_id"].tolist())
+    if requested is not None:
+        requested = list(dict.fromkeys(int(feature_id) for feature_id in requested))
+        missing = sorted(set(requested).difference(available))
+        if missing:
+            raise ValueError(
+                f"classify-role requested feature IDs unavailable after filtering: {missing}")
+        names = names[names["feature_id"].isin(requested)].copy()
+    linkage = pd.read_csv(linkage_path) if linkage_path else None
+
+    df = classify_response_roles(
+        codes.battles,
+        codes.z_a,
+        codes.z_b,
+        names,
+        client,
+        instruction_ids=codes.instruction_ids,
+        features=requested,
+        linkage=linkage,
+        **params,
+    )
+    path = _save(df, out_dir / outmap["classify-role"])
+    counts = df.get("behavior_scope", pd.Series(dtype=str)).value_counts().to_dict()
+    log(f"[classify-role] wrote {len(df)} feature roles {counts} -> {path}")
+    return path
 
 
 def _run_cluster(cfg, out_dir, names_path, get_client, log, outmap) -> Path:
     from prefscope.pipeline.cluster import (
-        load_cofiring_codes, name_clusters, summarize_clusters)
+        cluster_run_diagnostics, load_cofiring_codes, name_clusters,
+        summarize_clusters)
 
     params = dict(cfg.clusterer.params)
     cluster_on = params.pop("cluster_on", "difference")
@@ -378,11 +522,13 @@ def _run_cluster(cfg, out_dir, names_path, get_client, log, outmap) -> Path:
     clusterer = registry.make("clusterer", cfg.clusterer.component, **params)
     clusters = clusterer.cluster(z, features=_fidelity_features(names, restrict=fidelity_only))
     summary = summarize_clusters(clusters, names=names)
+    diagnostics = cluster_run_diagnostics(clusters)
 
     if do_name:
         labels = name_clusters(summary, get_client(), concurrency=concurrency)
-        summary["behavior"] = summary["cluster_id"].map(labels).where(
-            summary["cluster_id"].map(labels).astype(bool), summary["behavior"])
+        mapped_labels = summary["cluster_id"].map(labels)
+        has_label = mapped_labels.notna() & mapped_labels.astype(str).str.strip().ne("")
+        summary["behavior"] = mapped_labels.where(has_label, summary["behavior"])
 
     out = clusters.copy()
     if names is not None and "concept" in names.columns:
@@ -390,12 +536,14 @@ def _run_cluster(cfg, out_dir, names_path, get_client, log, outmap) -> Path:
     out = out.merge(summary[["cluster_id", "behavior"]], on="cluster_id", how="left")
     path = _save(out, out_dir / outmap["cluster"])
     _save(summary, out_dir / outmap["cluster"].replace(".csv", "_summary.csv"))
+    _save(diagnostics, out_dir / outmap["cluster"].replace(".csv", "_diagnostics.csv"))
     log(f"[cluster] {cfg.clusterer.component}: {len(clusters)} features -> "
         f"{clusters['cluster_id'].nunique()} behaviors -> {path}")
     return path
 
 
 def _run_win_relevance(cfg, out_dir, names_path, clusters_path, log, outmap) -> Path:
+    from prefscope.analysis.grouping import resolve_group_ids
     from prefscope.interpret.io import load_lens_battles
     from prefscope.pipeline.winrelevance import win_relevance, win_relevance_logistic
 
@@ -413,9 +561,17 @@ def _run_win_relevance(cfg, out_dir, names_path, clusters_path, log, outmap) -> 
     hp = battles["human_pref"].to_numpy()
     wc = lambda s: battles[s].fillna("").str.split().str.len().to_numpy()  # noqa: E731
     length = wc("completion_a") - wc("completion_b")
-    df = win_relevance(z_diff, hp, features=feats)
-    df = df.merge(win_relevance_logistic(z_diff, hp, length, features=feats),
-                  on="feature_id", how="left")
+    group_ids = resolve_group_ids(
+        battles, group_col=cfg.win_relevance.get("group_col"))
+    df = win_relevance(z_diff, hp, features=feats, group_ids=group_ids)
+    logistic = win_relevance_logistic(
+        z_diff, hp, length, features=feats, group_ids=group_ids).rename(columns={
+            "n_groups": "delta_win_n_groups",
+            "n_independent_groups": "delta_win_n_independent_groups",
+            "estimand": "delta_win_estimand",
+            "inference_test": "delta_win_inference_test",
+        })
+    df = df.merge(logistic, on="feature_id", how="left")
     if names is not None and "concept" in names.columns:
         df = df.merge(names[["feature_id", "concept"]], on="feature_id", how="left")
         df = df[["feature_id", "concept"]
@@ -426,7 +582,8 @@ def _run_win_relevance(cfg, out_dir, names_path, clusters_path, log, outmap) -> 
 
     if clusters_path is not None and Path(clusters_path).exists():
         from prefscope.pipeline.winrelevance import cluster_win_relevance
-        cdf = cluster_win_relevance(z_diff, hp, length, pd.read_csv(clusters_path))
+        cdf = cluster_win_relevance(
+            z_diff, hp, length, pd.read_csv(clusters_path), group_ids=group_ids)
         cout = out_dir / outmap["win-relevance"].replace(".csv", "_clusters.csv")
         _save(cdf, cout)
         log(f"[win-relevance] {len(cdf)} cluster-level rows -> {cout}")

@@ -113,11 +113,14 @@ def diagnosis_battles(per_battle: pd.DataFrame, feature_id: int, *,
         raise ValueError(f"{col} not in per-battle frame; was it diagnosed?")
     z = per_battle[col].to_numpy(dtype=float)
     if mode == "more":
-        order = np.argsort(-z); order = order[z[order] > 0]
+        order = np.argsort(-z)
+        order = order[z[order] > 0]
     elif mode == "less":
-        order = np.argsort(z); order = order[z[order] < 0]
+        order = np.argsort(z)
+        order = order[z[order] < 0]
     else:
-        order = np.argsort(-np.abs(z)); order = order[z[order] != 0]
+        order = np.argsort(-np.abs(z))
+        order = order[z[order] != 0]
     order = order[:n]
     out = per_battle.iloc[order].copy()
     out.insert(0, "z", z[order])

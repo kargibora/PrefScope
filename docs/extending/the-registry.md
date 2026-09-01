@@ -30,17 +30,29 @@ class MyVerifier(VerifyStrategy):
 
 ## Import to activate
 
-A decorator only runs when its module is imported. The built-in components register
-when you `import prefscope.adapters` (which imports the strategy/cluster/adapter
-modules). **For your own component to exist, its module must be imported too** —
-either:
+A decorator runs only when Python imports its module. In Python, import the module before
+calling `registry.make`, or load a declared list explicitly:
 
-- add an import to `prefscope/adapters/__init__.py` (so it registers with the
-  built-ins), or
-- import your module yourself before calling `registry.make` / running the pipeline.
+```python
+from prefscope import load_plugins
 
-If you forget this, `registry.make("verifier", "my-verifier")` will report the name
-as unknown — the class exists but was never registered.
+load_plugins(["my_package.prefscope_plugin"])
+```
+
+The `prefscope run` config accepts the same module list:
+
+```yaml
+plugins:
+  - my_package.prefscope_plugin
+```
+
+The runners import these modules in the given order before registry resolution. They do
+not search the environment or automatically import installed packages. Plug-in imports
+execute Python code, so use only trusted packages and lock their versions.
+
+`import prefscope.adapters` remains the compatibility aggregator for every built-in
+adapter, including heavy SAE implementations. Ordinary runners import only the built-ins
+they need.
 
 ## Configuration maps to constructor arguments
 
@@ -63,29 +75,39 @@ invisible to the validator. See each `add-a-*` guide.)
 |------|--------------|----------------|-------------|
 | `interpreter` | name each feature with a concept | `pairwise`, `individual`, `single-text` | `--name-mode` / `interpreter:` |
 | `verifier` | check a concept name is real | `pairwise`, `individual`, `prompt` | `--verify-mode` / `verifier:` |
-| `clusterer` | group co-firing features into behaviors | `mi-leiden`, `spherical-kmeans`, `agglomerative` | `--method` / `clusterer:` |
-| `lens_rep` | how the SAE input + codes are formed | `difference`, `individual`, `prompt` | `--input-rep` / lens manifest |
-| `sae` | the autoencoder architecture | `batchtopk`, `jumprelu`, `simple-topk` | `--sae-type` / lens manifest |
-| `negative_sampler` | pick "silent" items for fidelity checks | `random`, `similar` | `--negatives` |
-| `dataset` | adapt your data into `PairItem`s | `table`, `openjury` | *programmatic* (see below) |
+| `clusterer` | group co-firing features into communities | `cofire-leiden`, `mi-leiden`, `spherical-kmeans`, `agglomerative` | `--method` / `clusterer:` |
+| `representation_source` | produce aligned fixed-width vectors | `text-embedding`, `precomputed` | programmatic |
+| `analysis_component` | run one reusable analysis | `outcome-associations`, `paired-concept-shift`, `paired-outcome-shifts`, `prompt-conditioned-outcome-shifts`, `preference-length-confounds`, `feature-artifact-diagnostics` | `AnalysisPlan` |
+| `lens_rep` | built-in SAE input + code policy | `difference`, `individual`, `prompt` | `--input-rep` / lens manifest |
+| `sae` | the autoencoder architecture | `batchtopk`, `signed-batchtopk`, `batchtopk-relu`, `jumprelu`, `simple-topk` | `--sae-type` / lens manifest |
+| `negative_sampler` | pick "silent" items for fidelity checks | `random`, `close` (`similar` is an alias) | `--negatives` |
+| `dataset` | adapt your data into `PairItem`s | `table`, `openjury`, `huggingface` | *programmatic* (see below) |
 
 Each `add-a-*` guide gives the exact interface, the data your method receives, and a
 runnable example:
 
-- [Add a verifier](add-a-verifier.md) · [Add an interpreter](add-an-interpreter.md) · [Add a clusterer](add-a-clusterer.md)
-- [Add a dataset](add-a-dataset.md) · [Add a representation](add-a-representation.md) · [Add an SAE](add-an-sae.md)
+- [Add a verifier](add-a-verifier.md) · [Add an interpreter](add-an-interpreter.md) ·
+  [Add a clusterer](add-a-clusterer.md)
+- [Add a dataset](add-a-dataset.md) ·
+  [Add a representation source](add-a-representation-source.md) ·
+  [Lens representation policies](add-a-representation.md) · [Add an SAE](add-an-sae.md)
 
 ### Two notes
 
 - **`dataset` is programmatic today.** The live `build-lens` path reads a corpus
   parquet or annotation JSON directly; it does not name-select a `dataset`. You use
-  a custom `Dataset` by instantiating it and passing it to `LoadedLens.project(...)`
+  a custom `Dataset` by instantiating it and passing it to `Lens.project(...)`
   (any iterable of `PairItem`). See [bring your own dataset](../how-to/bring-your-own-dataset.md).
 - **The SAE is a `torch.nn.Module`,** not a lightweight strategy — it is used at both
   training and inference. Adding one means subclassing `BatchTopKSAE` rather than a
-  plain class; see [add an SAE](add-an-sae.md). The `representation` and `source`
-  kinds are also registered but are currently unwired (legacy of a removed build
-  facade) — prefer `lens_rep` for the contrast/representation seam.
+  plain class; see [add an SAE](add-an-sae.md).
+- **`lens_rep` is closed at the artifact boundary today.** The registry resolves the
+  three built-ins, but manifests and downstream capabilities do not safely round-trip
+  arbitrary third-party policies. Replace the vector producer through
+  `RepresentationSource`; do not advertise a custom `lens_rep` as reloadable.
+- **Third-party registration is import-driven.** Import the custom module before
+  programmatic use. PrefScope does not yet discover installed plug-ins in a fresh CLI
+  process.
 
 ## Why a registry
 

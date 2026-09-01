@@ -6,7 +6,9 @@ You are given several RESPONSES that strongly activate the feature (each inside 
 
 # Instructions
 
-Identify the single, specific property that the HIGH-ACTIVATING responses share and the NON-ACTIVATING ones lack.
+Identify the single, specific property most clearly enriched in the HIGH-ACTIVATING responses relative to the NON-ACTIVATING ones.
+
+This stage proposes a hypothesis that will be tested later on disjoint held-out responses. Test the same candidate separately against every displayed response and report those matches honestly. A useful candidate must recur across a clear majority of activators and be more prevalent there than in controls; never infer a direction from one salient outlier. An occasional naming-set counterexample makes the hypothesis less certain, but does not by itself prove that the feature lacks that behavior.
 
 The non-activating examples are SILENT controls: the feature does not fire on them. The feature is the property that is PRESENT in the activating responses but ABSENT in these controls — not a property both groups share. Do not assume the controls were picked to be subtly similar; they may simply be unrelated responses on which the feature is silent, so a clear, obvious difference is a perfectly good answer. If a candidate property (for example, bullet-point or numbered-list formatting) also appears in the non-activating examples, it is NOT the feature; keep looking for what actually separates the two groups.
 
@@ -18,15 +20,9 @@ Weigh two kinds of property equally — do not privilege topic over style:
 - CONTENT / INTENT: what the response does (defines a term, refuses a request, translates, gives instructions, lists options).
 - STYLE / BEHAVIOUR: how it is written — tone, verbosity, hedging vs. confidence, formality, politeness, directness, sycophancy, stance, or a distinctive formatting habit that is genuinely shared by all activators.
 
-A shared *way of writing* is as valid a feature as a shared subject.
-
-## Example features
-- "hedges the answer with cautious qualifiers"
-- "refuses a request on safety grounds"
-- "gives a terse, direct answer with no preamble"
-- "adopts an enthusiastic, encouraging tone"
-- "explains the meaning or usage of an English word"
-- "responds in Russian"
+A shared *way of writing* is as valid a feature as a shared subject. Do not pattern-match
+against a menu of suggested feature labels; derive the property only from the displayed
+evidence.
 
 ## Rules
 - ATOMIC: one property only. Do not join several with "and" or "or". If the activating responses share several unrelated properties, that is a polysemantic feature — say so (status) rather than combining them into one label.
@@ -34,7 +30,7 @@ A shared *way of writing* is as valid a feature as a shared subject.
 - A property of a single response — no comparatives ("more", "less", "instead of").
 - Objective and concrete ("is helpful" is too vague).
 - Judge it in the RESPONSE; do not name a property of the prompt.
-- If the activating responses share no single coherent property, or there are too few/weak examples to tell, abstain (status polysemantic / insufficient_evidence) instead of inventing a label.
+- If the activating responses share no recurring coherent property, the candidate is no more prevalent among activators than controls, or there are too few/weak examples to form a useful hypothesis, abstain (status polysemantic / insufficient_evidence) instead of inventing a label.
 
 # Examples
 

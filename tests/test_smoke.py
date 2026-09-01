@@ -10,7 +10,7 @@ except ModuleNotFoundError:  # Python 3.10
 
 
 def test_package_imports():
-    assert CONFIG.frozen_sae_dir.name == "features_m128_k16"
+    assert CONFIG.cache_dir.name == "prefscope"
 
 
 def test_version_matches_pyproject():

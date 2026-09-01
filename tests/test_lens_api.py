@@ -128,6 +128,11 @@ def test_top_concepts_no_names():
     assert _lens().top_concepts(np.array([[1.0, 2.0, 3.0]])) == [[]]
 
 
+def test_top_concepts_rejects_wrong_code_width():
+    with pytest.raises(ValueError, match="codes have 2 features but lens has 3"):
+        _lens(names=_names()).top_concepts(np.array([[1.0, 2.0]]))
+
+
 def test_concept_names_dedupes_duplicate_feature_id():
     names = pd.DataFrame({"feature_id": [0, 0, 1], "concept": ["a", "a2", "b"]})
     lens = _lens(names=names)
@@ -149,6 +154,92 @@ def test_top_concepts_skips_nan_codes():
     out = lens.top_concepts(np.array([[np.nan, 2.0, np.nan]]), k=5)
     concepts = [c for c, _ in out[0]]
     assert concepts == ["b"]   # only the non-NaN named code survives
+
+
+def test_concept_activations_returns_every_active_feature_with_annotations():
+    names = pd.DataFrame({
+        "feature_id": [0, 1, 2],
+        "concept": ["a", "b", "c"],
+        "fidelity_pass": [True, False, True],
+        "semantic_threshold": [1.5, 0.1, 0.4],
+        "presence_pass": [True, True, True],
+    })
+    lens = _lens(names=names)
+    codes = np.array([[2.0, -3.0, 0.5], [0.0, 0.0, 0.0]], dtype=np.float32)
+
+    out = lens.concept_activations(codes, row_ids=["x", "silent"])
+
+    assert list(out["feature_id"]) == [1, 0, 2]  # all nonzero, ranked by |activation|
+    assert list(out["concept"]) == ["b", "a", "c"]
+    assert list(out["activation"]) == [-3.0, 2.0, 0.5]
+    assert list(out["rank"]) == [1, 2, 3]
+    assert list(out["row_id"].unique()) == ["x"]  # silent row emits no active concepts
+    assert list(out["semantic_present"]) == [False, True, True]
+    assert list(out["concept_pole_matches_name"]) == [False, True, True]
+
+
+def test_concept_activations_filters_fidelity_presence_pole_and_top_k():
+    names = pd.DataFrame({
+        "feature_id": [0, 1, 2],
+        "concept": ["a", "b", "c"],
+        "fidelity_pass": [True, False, True],
+        "semantic_threshold": [1.5, 0.1, 0.4],
+        "presence_pass": [True, True, False],
+    })
+    lens = _lens(names=names)
+    codes = np.array([[2.0, 4.0, 0.5]], dtype=np.float32)
+
+    all_rows = lens.concept_activations(codes).set_index("feature_id")
+    assert not bool(all_rows.loc[2, "semantic_present"])
+    fid = lens.concept_activations(codes, fidelity_only=True, top_k=1)
+    assert list(fid["feature_id"]) == [0]  # feature 1 rejected; rank after filtering
+    present = lens.concept_activations(codes, semantic_presence_only=True)
+    assert list(present["feature_id"]) == [1, 0]  # feature 2 calibration failed
+    neg = lens.concept_activations(-codes, pole="negative", min_abs_activation=1.0)
+    assert list(neg["feature_id"]) == [1, 0]
+
+
+def test_lens_fidelity_filters_do_not_treat_string_false_or_nan_as_true():
+    names = pd.DataFrame({
+        "feature_id": [0, 1, 2],
+        "concept": ["a", "b", "c"],
+        "fidelity_pass": ["True", "False", np.nan],
+    })
+    lens = _lens(names=names)
+
+    assert lens.fidelity_feature_ids == [0]
+    out = lens.concept_activations(
+        np.array([[1.0, 2.0, 3.0]], dtype=np.float32), fidelity_only=True
+    )
+    assert out["feature_id"].tolist() == [0]
+
+
+def test_concept_activations_requires_bundled_filter_tables():
+    lens = _lens(names=pd.DataFrame({
+        "feature_id": [0], "concept": ["a"],
+    }))
+    codes = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+    with pytest.raises(ValueError, match="feature_fidelity"):
+        lens.concept_activations(codes, fidelity_only=True)
+    with pytest.raises(ValueError, match="feature_calibration"):
+        lens.concept_activations(codes, semantic_presence_only=True)
+
+
+def test_presence_uses_bundled_calibration_and_explicit_policy():
+    names = pd.DataFrame({
+        "feature_id": [0, 1, 2], "concept": ["a", "b", "c"],
+        "semantic_threshold": [1.5, np.nan, 0.4],
+        "presence_pass": [True, False, True],
+    })
+    lens = _lens(names=names)
+    codes = np.array([[1.0, 3.0, 0.5], [2.0, 0.0, 0.2]], dtype=np.float32)
+
+    calibrated = lens.presence(codes)
+    assert calibrated.feature_ids.tolist() == [0, 2]
+    assert calibrated.values.tolist() == [[False, True], [True, False]]
+    mixed = lens.presence(codes, policy="mixed")
+    assert mixed.basis.tolist() == [
+        "semantic_threshold", "positive_nonzero", "semantic_threshold"]
 
 
 # ---- back-compat project alias ------------------------------------------
@@ -227,7 +318,46 @@ def test_save_copies_dir(tmp_path):
     lens.save(src)
 
 
+
+
+def test_save_rejects_source_destination_overlap_and_file_destinations(tmp_path):
+    src = tmp_path / "source"
+    src.mkdir()
+    (src / "manifest.json").write_text('{"input_rep": "individual"}')
+    lens = _lens()
+    lens.lens_dir = src
+    with pytest.raises(ValueError, match="ancestors or descendants"):
+        lens.save(src / "nested")
+    with pytest.raises(ValueError, match="ancestors or descendants"):
+        lens.save(tmp_path, overwrite=True)
+    destination_file = tmp_path / "artifact.bin"
+    destination_file.write_bytes(b"old")
+    with pytest.raises(ValueError, match="directory path"):
+        lens.save(destination_file, overwrite=True)
+
+
+def test_publication_lock_cleans_up_when_initial_write_fails(tmp_path, monkeypatch):
+    import prefscope.api.loaded_lens as loaded_lens
+
+    destination = tmp_path / "lens"
+    def fail_write(*args, **kwargs):
+        raise OSError("injected lock write failure")
+
+    monkeypatch.setattr(loaded_lens.os, "write", fail_write)
+    with pytest.raises(OSError, match="injected"):
+        with loaded_lens._publication_lock(destination):
+            pass
+    assert not (tmp_path / ".lens.lock").exists()
+
 # ---- pairs_to_battles ----------------------------------------------------
+
+def test_pairs_to_battles_empty_preserves_canonical_schema():
+    frame = pairs_to_battles([])
+    assert list(frame.columns) == [
+        "instruction_id", "prompt", "completion_a", "completion_b",
+        "human_pref", "model_a", "model_b",
+    ]
+
 
 def test_pairs_to_battles_from_pairitems():
     pairs = [PairItem(id="1", x="q1", y_a="a1", y_b="b1", pref=1.0,
@@ -299,6 +429,10 @@ def test_lens_train_wires_config(monkeypatch, tmp_path):
     assert calls["kw"]["m_total"] == 64
     assert calls["kw"]["k"] == 8
     assert calls["kw"]["input_rep"] == "individual"
+    assert calls["kw"]["sae_type"] == "auto"
+    assert calls["kw"]["sparsity_coef"] == 1e-3
+    assert calls["kw"]["bandwidth"] == 1e-3
+    assert calls["kw"]["sparsity_warmup_steps"] == 0
     assert calls["kw"]["matryoshka_prefix"] == (4, 16)
     assert calls["kw"]["val_frac"] == 0.2
     assert calls["kw"]["device"] == "cpu"
@@ -311,7 +445,7 @@ def test_lens_train_wires_config(monkeypatch, tmp_path):
 def test_lens_train_rejects_colliding_train_kwargs(monkeypatch, tmp_path):
     import prefscope.pipeline.build_lens as bl
     import prefscope.encode.embed as emb_mod
-    from prefscope.api.config import SAEConfig, TrainConfig
+    from prefscope.api.config import TrainConfig
 
     monkeypatch.setattr(bl, "build_lens", lambda *a, **k: {"ok": True})
     monkeypatch.setattr(emb_mod, "Embedder", lambda *a, **k: object())
@@ -321,3 +455,85 @@ def test_lens_train_rejects_colliding_train_kwargs(monkeypatch, tmp_path):
     cfg = TrainConfig(train_kwargs={"m_total": 999, "k": 3})
     with pytest.raises(ValueError, match="train_kwargs may not override"):
         Lens.train(pairs, cfg, out=tmp_path / "lens")
+
+
+
+def test_save_rejects_active_publication_lock(tmp_path):
+    import json
+    import os
+    import socket
+    import uuid
+
+    src = tmp_path / "src-lock"
+    src.mkdir()
+    (src / "manifest.json").write_text('{"input_rep": "individual"}')
+    lens = _lens()
+    lens.lens_dir = src
+    dest = tmp_path / "published"
+    lock = tmp_path / ".published.lock"
+    lock.write_text(json.dumps({
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "owner_id": uuid.uuid4().hex,
+    }))
+
+    with pytest.raises(RuntimeError, match="another active publisher"):
+        lens.save(dest)
+    assert not dest.exists()
+    assert lock.exists()
+
+
+def test_save_recovers_sole_orphan_backup_deterministically(tmp_path):
+    import uuid
+
+    src = tmp_path / "src-recovery"
+    src.mkdir()
+    (src / "manifest.json").write_text('{"input_rep": "individual"}')
+    lens = _lens()
+    lens.lens_dir = src
+    dest = tmp_path / "published"
+    backup = tmp_path / f".published.bak-{uuid.uuid4().hex}"
+    backup.mkdir()
+    (backup / "old.txt").write_text("old")
+
+    # Recovery happens before overwrite policy. The recovered prior artifact is
+    # preserved, and the caller must still explicitly authorize its replacement.
+    with pytest.raises(FileExistsError, match="overwrite=True"):
+        lens.save(dest)
+    assert (dest / "old.txt").read_text() == "old"
+    assert not backup.exists()
+
+    lens.save(dest, overwrite=True)
+    assert (dest / "manifest.json").exists()
+    assert not (dest / "old.txt").exists()
+
+
+def test_save_uses_uuid_staging_and_backup_names(tmp_path, monkeypatch):
+    import importlib
+    import re
+
+    module = importlib.import_module("prefscope.api.loaded_lens")
+    src = tmp_path / "src-uuid"
+    src.mkdir()
+    (src / "manifest.json").write_text('{"input_rep": "individual"}')
+    lens = _lens()
+    lens.lens_dir = src
+    dest = tmp_path / "published"
+    dest.mkdir()
+    (dest / "old.txt").write_text("old")
+    seen = []
+    real_replace = module.os.replace
+
+    def capture(source, target):
+        seen.append((module.Path(source).name, module.Path(target).name))
+        return real_replace(source, target)
+
+    monkeypatch.setattr(module.os, "replace", capture)
+    lens.save(dest, overwrite=True)
+
+    names = {name for pair in seen for name in pair}
+    assert any(
+        re.fullmatch(r"\.published\.tmp-[0-9a-f]{32}", name) for name in names)
+    assert any(
+        re.fullmatch(r"\.published\.bak-[0-9a-f]{32}", name) for name in names)
+    assert not (tmp_path / ".published.lock").exists()

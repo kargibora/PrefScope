@@ -29,6 +29,7 @@ the code is literally `project(e_A − e_B)`. Two consequences:
 
 This is the WIMHF-style default. It is the right choice when your unit of analysis is
 always a *pair* and you want axes that are explicitly about A-vs-B difference.
+`--sae-type auto` uses signed BatchTopK for this representation.
 
 ## `individual` — train on pooled single responses
 
@@ -42,6 +43,11 @@ encoder `f` therefore applies to *any lone response* — and the contrast code i
 *after* projection, as `f(e_A) − f(e_B)`. A difference lens cannot do this: its
 encoder only ever saw contrasts. The lens saves `z_a`, `z_b`, and the derived
 `z_diff = z_a − z_b`.
+
+`--sae-type auto` uses non-negative BatchTopK here: `z_a` and `z_b` are feature
+presences, while their derived difference is signed. This matches single-text naming's
+positive-versus-silent evidence. You can explicitly train a signed individual SAE, but
+its one-pole interpretation must be acknowledged with `pole: positive`.
 
 This is the right choice when you need to score a **single** response on its own — any
 inference-time use where you do not have a paired opponent (e.g. evaluating a draft,
@@ -79,10 +85,10 @@ single responses, build an `individual` lens.
 | Analyze prompts (no A/B pair at all) | a prompt lens (`build-prompt-lens`) |
 
 A prompt lens is a third, non-contrastive case: a plain SAE over single prompt
-vectors, with no A/B pairing. Its `LensRep` is marked non-contrastive and the
-contrast operations (bank / diagnose) refuse it with a clear message rather than
-producing nonsense.
+vectors, with no A/B pairing. Its default SAE codes are non-negative activations. Its
+`LensRep` is marked non-contrastive, and contrast operations (bank / diagnose) refuse
+it with a clear message rather than producing nonsense.
 
-For the exact build flags (`--input-rep`, `--dump-embeddings` for cheap re-fits), see
-the build-and-analyze how-to; to add a new representation as a registered `LensRep`,
-see `docs/extending/`.
+For a practical choice, see [Build and analyze a lens](../how-to/build-and-analyze-a-lens.md).
+For exact flags, see the [CLI reference](../reference/cli.md). To replace the vector
+source, see [Add a representation source](../extending/add-a-representation-source.md).

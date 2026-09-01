@@ -4,12 +4,15 @@ import pytest
 
 from prefscope.core import registry
 from prefscope.pipeline.cluster import (
-    AgglomerativeClusterer, Clusterer, MiLeidenClusterer, SphericalKmeansClusterer,
+    AgglomerativeClusterer, Clusterer, CofireLeidenClusterer, MiLeidenClusterer,
+    SphericalKmeansClusterer,
 )
 
 
 def test_clusterer_bucket_registered():
-    assert {"mi-leiden", "spherical-kmeans", "agglomerative"} <= set(registry.available("clusterer"))
+    assert {"cofire-leiden", "mi-leiden", "spherical-kmeans", "agglomerative"} <= set(
+        registry.available("clusterer"))
+    assert isinstance(registry.make("clusterer", "cofire-leiden"), CofireLeidenClusterer)
     assert isinstance(registry.make("clusterer", "mi-leiden"), MiLeidenClusterer)
 
 
@@ -60,8 +63,33 @@ def test_cluster_summary_never_uses_failed_opposite_pole_name():
         "correlation": [-0.99, 0.5], "fidelity_pass": [False, True],
     })
     row = summarize_clusters(clusters, names).iloc[0]
-    assert row["behavior"] == "verified name"
+    assert row["behavior"] == "cluster 0"
     assert row["member_concepts"] == "verified name"
 
     names["fidelity_pass"] = False
     assert summarize_clusters(clusters, names).iloc[0]["behavior"] == "cluster 0"
+
+
+def test_cluster_namer_allows_mixed_and_uses_representatives():
+    import pandas as pd
+    from prefscope.pipeline.cluster import name_clusters
+
+    class Client:
+        def __init__(self):
+            self.prompts = []
+
+        def raw(self, messages, **_):
+            self.prompts.append(messages[0]["content"])
+            return "MIXED"
+
+    summary = pd.DataFrame([{
+        "cluster_id": 4,
+        "representative_concepts": "written in Russian | financial advice",
+        "member_concepts": "ignored early member",
+    }])
+    client = Client()
+    labels = name_clusters(summary, client)
+    assert labels == {4: "Mixed / incoherent"}
+    assert "written in Russian" in client.prompts[0]
+    assert "Do not assume" in client.prompts[0]
+    assert "ONE higher-level behavior" not in client.prompts[0]

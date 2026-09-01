@@ -1,19 +1,29 @@
-"""Shared paths and defaults for PrefScope."""
+"""Shared defaults for PrefScope."""
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 
-# Paths assume the package runs in-place: [tool.uv] package = false ensures
-# __file__ resolves inside the repo rather than site-packages.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+def _default_cache_dir() -> Path:
+    """Return a user-writable, platform-appropriate embedding cache directory."""
+    if value := os.environ.get("PREFSCOPE_CACHE_DIR"):
+        return Path(value).expanduser()
+    if value := os.environ.get("XDG_CACHE_HOME"):
+        return Path(value).expanduser() / "prefscope"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "prefscope"
+    if os.name == "nt" and (value := os.environ.get("LOCALAPPDATA")):
+        return Path(value).expanduser() / "prefscope" / "Cache"
+    return Path.home() / ".cache" / "prefscope"
 
 
 @dataclass(frozen=True)
 class Config:
-    # frozen SAE used for capabilities (1) and (2)
-    frozen_sae_dir: Path = PROJECT_ROOT / "features_m128_k16"
-    cache_dir: Path = PROJECT_ROOT / "data" / "cache"
+    cache_dir: Path = _default_cache_dir()
     embed_model_id: str = "Qwen/Qwen3-Embedding-8B"
     max_tokens: int = 4096
     # GPU-friendly default; raise via --embed-batch-size on large-VRAM cards
@@ -35,6 +45,22 @@ class Config:
         "(e.g. coding, math, summarization, clarification, factual question, "
         "creative writing, translation) and its topic."
     )
+
+
+VIEWER_EXPORT_DEFAULTS = MappingProxyType({
+    "examples_per_feature": 12,
+    "examples_per_group": 2,
+    "examples_random": 4,
+    "examples_boundary": 4,
+    "prompt_examples_per_feature": 8,
+    "prompt_examples_per_group": 2,
+    "prompt_examples_random": 4,
+    "prompt_examples_boundary": 4,
+    "map_sample": 2500,
+    "map_sample_mode": "hybrid",
+    "coactivation_top_k": 20,
+    "coactivation_max_pairs": 20000,
+})
 
 
 CONFIG = Config()

@@ -16,7 +16,11 @@ class SAEConfig:
     m: int = 128
     k: int = 16
     input_rep: str = "individual"        # "individual" | "difference" | "prompt"
-    matryoshka_prefix: tuple[int, ...] = (8,)
+    sae_type: str = "auto"
+    matryoshka_prefix: tuple[int, ...] = ()
+    sparsity_coef: float = 1e-3
+    bandwidth: float = 1e-3
+    sparsity_warmup_steps: int = 0
 
 
 @dataclass
@@ -24,6 +28,7 @@ class TrainConfig:
     """Run-time training configuration; nests the architecture in ``sae``."""
     sae: SAEConfig = field(default_factory=SAEConfig)
     embed_model_id: str | None = None    # None -> embedder/config default
+    embed_model_revision: str | None = None
     val_frac: float = 0.1
     # A safe library default: callers can opt into "cuda"/"mps" explicitly.
     # This makes Lens.train(data, out=...) work on an ordinary CPU installation.

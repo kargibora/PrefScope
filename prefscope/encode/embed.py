@@ -7,6 +7,7 @@ loaded lazily on first uncached batch.
 from __future__ import annotations
 
 import logging
+import json
 
 import numpy as np
 
@@ -19,42 +20,94 @@ logger = logging.getLogger(__name__)
 class Embedder:
     def __init__(self, cache: NpyCache | None, *,
                  model_id: str = CONFIG.embed_model_id, device: str = "cpu",
+                 model_revision: str | None = None,
                  max_tokens: int = CONFIG.max_tokens,
                  batch_size: int = CONFIG.embed_batch_size, dtype=None,
                  cache_workers: int = 32, backend: str = "hf",
                  tensor_parallel_size: int = 1,
                  api_base: str | None = None,
-                 api_key_env: str = "OPENAI_API_KEY") -> None:
+                 api_key_env: str = "OPENAI_API_KEY",
+                 embed_instruction: str = CONFIG.embed_instruction,
+                 prompt_embed_instruction: str = CONFIG.prompt_embed_instruction,
+                 pooling: str = "last-token",
+                 normalization: str = "l2") -> None:
         if backend not in ("hf", "vllm", "vllm-server"):
             raise ValueError(
                 f"backend must be 'hf', 'vllm', or 'vllm-server', got {backend!r}")
         self.cache = cache
         self.model_id = model_id
+        self.model_revision = model_revision
         self.device = device
         self.max_tokens = max_tokens
         self.batch_size = batch_size
-        self.dtype = dtype     # None -> bf16 on cuda, fp32 elsewhere
+        self.dtype = dtype     # None -> bf16 CUDA, fp16 MPS, fp32 CPU
         self.cache_workers = max(1, cache_workers)   # parallel cache reads
         self.backend = backend
         self.tensor_parallel_size = tensor_parallel_size
         self.api_base = api_base          # vllm-server: OpenAI-compatible /v1 URL
         self.api_key_env = api_key_env
+        if pooling != "last-token":
+            raise ValueError("PrefScope currently supports pooling='last-token' only")
+        if normalization != "l2":
+            raise ValueError("PrefScope currently supports normalization='l2' only")
+        self.embed_instruction = embed_instruction
+        self.prompt_embed_instruction = prompt_embed_instruction
+        self.pooling = pooling
+        self.normalization = normalization
         self._model = None
         self._tok = None
         self._client = None
 
+    def effective_dtype_name(self) -> str:
+        if self.dtype is not None:
+            return str(self.dtype).removeprefix("torch.")
+        if str(self.device).startswith("cuda"):
+            return "bfloat16"
+        if str(self.device).startswith("mps"):
+            return "float16"
+        return "float32"
+
     def format_query(self, prompt: str, completion: str) -> str:
         # WIMHF instruction-aware format (verbatim instruction in config)
-        return (f"{CONFIG.embed_instruction}\n\n"
+        return (f"{self.embed_instruction}\n\n"
                 f"User: {prompt}\n\nAssistant: {completion}")
 
     def format_prompt_query(self, prompt: str) -> str:
         # prompt-only format for the prompt-concept lens (no Assistant turn)
-        return f"{CONFIG.prompt_embed_instruction}\n\nUser: {prompt}"
+        return f"{self.prompt_embed_instruction}\n\nUser: {prompt}"
 
     def _cache_key(self, query: str) -> str:
-        # namespace by model_id so different embedders never collide in one cache
-        return text_key(f"{self.model_id}\x1f{query}")
+        # Namespace by the full numerical/text preprocessing contract. Two revisions,
+        # truncation limits, or instructions must never share cached vectors.
+        contract = json.dumps(
+            {
+                "model_id": self.model_id,
+                "model_revision": self.model_revision,
+                "max_tokens": self.max_tokens,
+                "pooling": self.pooling,
+                "normalization": self.normalization,
+                "backend": self.backend,
+                "dtype": self.effective_dtype_name(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return text_key(f"{contract}\x1f{query}")
+
+    def provenance(self, *, prompt: bool = False) -> dict:
+        """Serializable embedding contract stored in a lens manifest."""
+        return {
+            "embed_model_id": self.model_id,
+            "embed_model_revision": self.model_revision,
+            "max_tokens": int(self.max_tokens),
+            "embed_instruction": (
+                self.prompt_embed_instruction if prompt else self.embed_instruction
+            ),
+            "pooling": self.pooling,
+            "normalization": self.normalization,
+            "dtype": self.effective_dtype_name(),
+            "backend": self.backend,
+        }
 
     @staticmethod
     def _engine_arg_fields() -> set:
@@ -106,6 +159,8 @@ class Embedder:
             #  model like Qwen3-Embedding is also auto-detected, so neither is
             #  strictly required as a last resort).
             fields = self._engine_arg_fields()
+            if self.model_revision and "revision" in fields:
+                kwargs["revision"] = self.model_revision
             if "runner" in fields:
                 kwargs["runner"] = "pooling"
             elif "task" in fields:
@@ -116,10 +171,25 @@ class Embedder:
         from transformers import AutoModel, AutoTokenizer
         dtype = self.dtype
         if dtype is None:
-            dtype = torch.bfloat16 if str(self.device).startswith("cuda") else torch.float32
-        self._tok = AutoTokenizer.from_pretrained(self.model_id, padding_side="left")
+            if str(self.device).startswith("cuda"):
+                dtype = torch.bfloat16
+            elif str(self.device).startswith("mps"):
+                # An 8B embedder is ~32 GB in fp32 and cannot fit on an ordinary Mac.
+                # MPS supports fp16 inference and halves the weight footprint.
+                dtype = torch.float16
+            else:
+                dtype = torch.float32
+        elif isinstance(dtype, str):
+            try:
+                dtype = getattr(torch, dtype.removeprefix("torch."))
+            except AttributeError as exc:
+                raise ValueError(f"unsupported torch dtype {self.dtype!r}") from exc
+        revision = ({"revision": self.model_revision}
+                    if self.model_revision is not None else {})
+        self._tok = AutoTokenizer.from_pretrained(
+            self.model_id, padding_side="left", **revision)
         self._model = AutoModel.from_pretrained(
-            self.model_id, torch_dtype=dtype).to(self.device)
+            self.model_id, torch_dtype=dtype, **revision).to(self.device)
         self._model.eval()
 
     def unload(self) -> None:
@@ -148,7 +218,9 @@ class Embedder:
         if self._tok is not None:
             return self._tok
         from transformers import AutoTokenizer
-        self._tok = AutoTokenizer.from_pretrained(self.model_id)
+        revision = ({"revision": self.model_revision}
+                    if self.model_revision is not None else {})
+        self._tok = AutoTokenizer.from_pretrained(self.model_id, **revision)
         return self._tok
 
     def _truncate_for_server(self, batch, tok) -> list[str]:
@@ -265,8 +337,15 @@ class Embedder:
         return np.vstack(out).astype(np.float32)
 
     def encode(self, prompts: list[str], completions: list[str]) -> np.ndarray:
-        return self.encode_queries(
-            [self.format_query(p, c) for p, c in zip(prompts, completions)])
+        prompts, completions = list(prompts), list(completions)
+        if len(prompts) != len(completions):
+            raise ValueError(
+                f"prompts and completions must have the same length; got "
+                f"{len(prompts)} and {len(completions)}")
+        return self.encode_queries([
+            self.format_query(p, c)
+            for p, c in zip(prompts, completions, strict=True)
+        ])
 
     def encode_prompts(self, prompts: list[str]) -> np.ndarray:
         """Embed prompts ALONE (prompt-only query) for the prompt-concept lens."""
@@ -303,16 +382,11 @@ class Embedder:
         # Parallel reads: np.load is I/O-bound and releases the GIL, and a parallel
         # filesystem (Lustre) serves many small reads far faster than serial ones.
         if cached:
-            from concurrent.futures import ThreadPoolExecutor
-
-            def _get(item):
-                i, k = item
-                return i, self.cache.get(k)
-
-            with ThreadPoolExecutor(max_workers=self.cache_workers) as ex:
-                for i, vec in tqdm(ex.map(_get, cached), total=len(cached),
-                                   desc="cache load", unit="vec"):
-                    results[i] = vec
+            vectors = self.cache.get_many(
+                [k for _, k in cached], workers=self.cache_workers)
+            for i, k in tqdm(cached, total=len(cached),
+                             desc="cache load", unit="vec"):
+                results[i] = vectors[k]
 
         if unique_texts:
             # _encode_uncached caches each vector per-item (keyed by unique_keys)
@@ -320,5 +394,7 @@ class Embedder:
             for i, uid in pending:
                 if results[i] is None:
                     results[i] = vecs[uid]
+            if self.cache is not None:
+                self.cache.flush()
 
         return np.vstack([r.reshape(-1) for r in results]).astype(np.float32)

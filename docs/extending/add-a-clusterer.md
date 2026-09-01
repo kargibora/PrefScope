@@ -1,10 +1,15 @@
 # Add a clusterer
 
-A **clusterer** groups co-firing features into higher-level behaviors — a large
+A **clusterer** groups co-firing features into corpus-specific feature groups — a large
 dictionary tends to split one behavior across several near-duplicate features, and
-clustering merges the features that fire together so you analyze a handful of
-behaviors instead of hundreds of axes. PrefScope ships three (`mi-leiden`,
+clustering merges the features that fire together so you analyze communities instead
+of hundreds of isolated axes. PrefScope ships four (`cofire-leiden`, `mi-leiden`,
 `spherical-kmeans`, `agglomerative`); this guide shows how to add your own.
+
+`cofire-leiden` is the recommended built-in for interpreted features. It connects
+positive concept poles that co-occur more than chance and reports stability across
+Leiden seeds. A statistical community may still reflect a topic or dataset confound,
+so it should not be treated as one behavior without inspecting its diagnostics.
 
 Read [the registry](the-registry.md) first if you haven't — it explains how
 components are registered and selected. This guide assumes you know that part.
@@ -21,10 +26,10 @@ class Clusterer(ABC):
         ...
 ```
 
-- **`z: np.ndarray`** — the `(N, M)` co-firing matrix. The framework picks *which*
-  matrix by lens kind (`z_diff` for a difference lens, stacked `[z_a; z_b]` for an
-  individual lens, `z_prompt` for a prompt lens), so you just cluster the columns
-  you're handed.
+- **`z: np.ndarray`** — the `(N, M)` matrix to cluster. Difference and individual
+  lenses use `z_diff` by default. Set `cluster_on: individual` to stack `z_a` and `z_b`
+  for an individual lens. A prompt lens uses `z_prompt`. Your clusterer only needs to
+  cluster the matrix it receives.
 - **`features`** — an optional list of feature ids to restrict to (e.g. only the
   fidelity-verified ones); `None` means all `M` columns.
 - **returns** — a `DataFrame` with `feature_id` and `cluster_id` (both int), one row
@@ -88,10 +93,13 @@ prefscope cluster-features --lens-dir lenses/mylens --method quantile-bucket ...
 clusterer: {name: quantile-bucket, n_clusters: 8}
 ```
 
-The default `mi-leiden` clusterer needs `igraph` + `leidenalg`, installed via the
+The Leiden clusterers need `igraph` + `leidenalg`, installed via the
 `cluster` extra: `uv sync --extra cluster`.
 
-The built-ins for reference: `mi-leiden` (params `resolution`, `knn`,
+The built-ins for reference: `cofire-leiden` (params `resolution`, `knn`,
+`affinity_metric`, `pole`, `min_cooccur`, `knn_mode`, `min_cluster_size`,
+`small_community_policy`, `stability_runs`, `super_resolution`, `super_knn`, `seed`),
+`mi-leiden` (params `resolution`, `knn`,
 `min_cluster_size`, `seed`), `spherical-kmeans` (`n_clusters`, `seed`),
 `agglomerative` (`n_clusters`, `seed`). Config params are validated against your
 `__init__` keywords (plus the reserved control keys), so a typo raises a clear error

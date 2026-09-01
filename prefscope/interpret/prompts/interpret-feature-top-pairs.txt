@@ -1,6 +1,6 @@
 # Task Overview
 
-You are a machine learning researcher who has trained a neural network on a text dataset. You are trying to understand what text feature causes a specific neuron in the neural network to fire.
+You are a machine learning researcher analyzing which text property is associated with a sparse-autoencoder feature's activation.
 
 Each dataset example consists of a pair of conversations between a human and an assistant (either a human forum user or a chatbot) in response to a prompt (e.g., a question, a Reddit post, a request for advice, etc.).
 Some conversations are multi-turn, others are single-turn.

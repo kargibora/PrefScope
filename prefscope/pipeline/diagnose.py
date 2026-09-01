@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from prefscope.analysis.presence import annotation_flag
 from prefscope.data.orient import orient_to_model
 
 _OUTCOME_NUM = {"win": 1.0, "tie": 0.5, "loss": 0.0}
@@ -191,7 +192,9 @@ def _attach_and_sort(df, names, sort_col):
 
 def _feat_filter(names, fidelity_only):
     if names is not None and fidelity_only and "fidelity_pass" in names.columns:
-        return names.loc[names["fidelity_pass"].astype(bool), "feature_id"].astype(int).tolist()
+        return names.loc[
+            names["fidelity_pass"].map(annotation_flag), "feature_id"
+        ].astype(int).tolist()
     return None
 
 

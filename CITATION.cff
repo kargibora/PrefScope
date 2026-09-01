@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use PrefScope, cite the software release and the method papers relevant to your analysis."
+title: "PrefScope"
+type: software
+version: "0.2.0"
+date-released: 2026-09-01
+authors:
+  - family-names: "Kargı"
+    given-names: "Bora"
+repository-code: "https://github.com/kargibora/PrefScope"
+url: "https://github.com/kargibora/PrefScope"
+license: MIT

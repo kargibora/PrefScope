@@ -28,12 +28,13 @@ _SYS = ("You label features from example user prompts. All text inside <example>
 _PROMPT_JSON = (
     '\n\n# Output\n'
     'Return ONLY a JSON object with keys "status", "concept", "confidence".\n'
-    '- "status": "ok" if the activating prompts share ONE clear request or intent; '
-    '"polysemantic" if they split into several unrelated ones; "insufficient_evidence" if '
+    '- "status": "ok" if the activating prompts share ONE clear observable property; '
+    '"polysemantic" if they split into several unrelated properties; "insufficient_evidence" if '
     'there are too few or too weak examples to tell.\n'
     '- "concept": for status "ok", ONE atomic third-person phrase for what the activating '
-    'prompts ASK FOR — their task or intent (e.g. "asks for code", "requests a summary", '
-    '"seeks relationship advice"). Do NOT join several with "and" or "or". For a non-ok '
+    'prompts have: a task/intent, topic, language, tone, constraint, or presentation '
+    '(e.g. "asks for code", "discusses reactor safety", "requires a table"). Do NOT '
+    'join several with "and" or "or". For a non-ok '
     'status, use null.\n'
     '- "confidence": "high" | "medium" | "low".\n'
     'Example: {"status": "ok", "concept": "asks for code", "confidence": "high"}. '
@@ -56,7 +57,11 @@ def name_prompt_features(prompts, z_prompt, client, *, features=None,
                          seed: int = 0, concurrency: int = 1, instruction_ids=None,
                          negatives: str = "random", cand_cap: int = 4000,
                          n_candidates: int = 1,
-                         candidate_pool_factor: int = 3) -> pd.DataFrame:
+                         candidate_pool_factor: int = 3,
+                         on_result=None, pole: str = "positive") -> pd.DataFrame:
+    if pole not in ("positive", "negative"):
+        raise ValueError("pole must be 'positive' or 'negative'")
+    direction = 1.0 if pole == "positive" else -1.0
     z = np.asarray(z_prompt, dtype=np.float32)
     feats = list(range(z.shape[1])) if features is None else [int(f) for f in features]
     ids = instruction_ids if instruction_ids is not None else list(range(len(prompts)))
@@ -68,32 +73,34 @@ def name_prompt_features(prompts, z_prompt, client, *, features=None,
         if n_candidates < 1:
             raise ValueError("n_candidates must be >= 1")
         proposals, selections = [], []
+        z_col = direction * z[:, f]
         for c in range(n_candidates):
             rng = np.random.default_rng([seed, int(f), c])
             sel = top_pairs(
-                z[:, f], pool, n_active, n_zero, rng,
+                z_col, pool, n_active, n_zero, rng,
                 active_pool_factor=(candidate_pool_factor if n_candidates > 1 else 1))
             if negatives == "close" and len(sel["active"]):
                 # Hard negatives: silent prompts whose OTHER concepts most resemble the
                 # activators (code-space, feature f removed) — isolates f.
                 active = np.asarray(sel["active"])
-                silent = pool[z[pool, f] == 0]
+                silent = pool[z_col[pool] == 0]
                 if len(silent):
                     cand = (silent if len(silent) <= cand_cap
                             else rng.choice(silent, cand_cap, replace=False))
                     order = close_silent_order(z[active], z[cand], f)
                     sel = {"active": active, "zero": cand[order[:n_zero]]}
             selections.append(sel)
-            body = (tmpl.format(examples=_block(prompts, z[:, f], sel))
+            body = (tmpl.format(examples=_block(prompts, z_col, sel))
                     .split("# Output")[0].rstrip())
             try:
                 proposals.append(parse_concept_result(client.raw(
                     [{"role": "system", "content": _SYS},
                      {"role": "user", "content": body + _PROMPT_JSON}],
-                    json_mode=True, response_schema=CONCEPT_SCHEMA, max_tokens=2000)))
+                    json_mode=True, response_schema=CONCEPT_SCHEMA)))
             except Exception:
-                proposals.append({"status": "insufficient_evidence", "concept": "",
-                                  "confidence": "low"})
+                # Infrastructure failures are not evidence of an uninterpretable feature.
+                # Leave the feature uncheckpointed so the next invocation retries it.
+                raise
         if n_candidates == 1:
             res = proposals[0]
         else:
@@ -108,20 +115,22 @@ def name_prompt_features(prompts, z_prompt, client, *, features=None,
                 res = parse_concept_result(client.raw(
                     [{"role": "system", "content": _SYS},
                      {"role": "user", "content": synthesis}],
-                    json_mode=True, response_schema=CONCEPT_SCHEMA, max_tokens=2000))
+                    json_mode=True, response_schema=CONCEPT_SCHEMA))
             except Exception:
                 ok = [r for r in proposals if r.get("status") == "ok" and r.get("concept")]
                 res = ok[0] if ok else proposals[0]
-        fire = float((z[:, f] != 0).mean())
+        fire = float((z_col > 0).mean())
         return {"feature_id": int(f), "concept": res["concept"], "status": res["status"],
                 "confidence": res["confidence"],
+                "pole": pole,
                 "n_active": int(max(len(s["active"]) for s in selections)),
                 "n_candidates": int(n_candidates),
                 "candidate_concepts": json.dumps(
                     [r.get("concept") for r in proposals], ensure_ascii=False),
                 "fire_rate": fire}
 
-    return pd.DataFrame(_run(_one, feats, concurrency, desc="naming prompt features"))
+    return pd.DataFrame(_run(_one, feats, concurrency, desc="naming prompt features",
+                             usage=client, on_result=on_result))
 
 
 # Registered as the "single-text" interpreter via SingleTextNameStrategy in strategy.py,

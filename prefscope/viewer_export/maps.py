@@ -1,20 +1,170 @@
-"""2D map exports: battle-level (z_diff), prompt-space (z_prompt), and
-single-response (z_a, plus z_b for paired data) UMAP scatters."""
+"""2D map exports for SAE features, responses, battles, and prompts."""
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from prefscope.analysis.presence import annotation_flag
 from prefscope.artifacts import (
-    BATTLES, FEATURE_NAMES, Z_A, Z_B, Z_DIFF, Z_PROMPT, battle_id_col,
+    BATTLES, FEATURE_NAMES, Z_A, Z_B, Z_PROMPT, battle_id_col,
+    require_paired_codes,
     lens_battle_ids,
 )
+from prefscope.core.manifest import LensManifest
 from prefscope.data.pair_schema import orient_by_label
 
 from .sanitize import _concept_or_none, _read_csv
+
+
+def _require_antisymmetric_codes(lens_dir: Path, *, command: str) -> None:
+    manifest = LensManifest.from_dict(
+        json.loads((lens_dir / "manifest.json").read_text()), strict=False)
+    if manifest.input_rep != "individual":
+        raise ValueError(
+            f"{command} orients A/B codes by preference and therefore needs an "
+            "individual lens. A nonlinear direct-difference lens cannot be reversed "
+            "by negating z_diff.")
+
+
+def _svd2d(values: np.ndarray) -> np.ndarray:
+    """Deterministic two-dimensional projection used when UMAP is unavailable."""
+    x = np.asarray(values, dtype=np.float32)
+    x = x - x.mean(axis=0, keepdims=True)
+    u, s, _ = np.linalg.svd(x, full_matrices=False)
+    xy = u[:, :2] * s[:2]
+    if xy.shape[1] < 2:
+        xy = np.pad(xy, ((0, 0), (0, 2 - xy.shape[1])))
+    return xy.astype(np.float32, copy=False)
+
+
+def export_feature_map(lens: Path, features: pd.DataFrame, *, seed: int = 0,
+                       n_neighbors: int = 30, min_dist: float = 0.12) -> dict | None:
+    """Project every SAE decoder direction to a searchable two-dimensional atlas.
+
+    This is a map of *features*, not a map of sampled responses.  Its geometry comes
+    only from the trained SAE decoder, so changing an LLM-authored feature name cannot
+    move a point.  Corpus co-activation is intentionally exported separately and can be
+    overlaid by the viewer without conflating it with decoder-space proximity.
+
+    Every decoder column is retained, including unnamed, unverified, and zero-norm
+    columns.  Zero-norm columns have no decoder geometry; they are placed on a small
+    deterministic ring outside the projected cloud and marked in the payload.
+    """
+    lens = Path(lens)
+    checkpoint = lens / "sae_model.pt"
+    if not checkpoint.exists():
+        return None
+    if n_neighbors < 2:
+        raise ValueError("feature-map n_neighbors must be at least 2")
+    if min_dist < 0:
+        raise ValueError("feature-map min_dist must be non-negative")
+
+    import torch
+
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    state = payload.get("state_dict", {})
+    decoder = state.get("decoder.weight")
+    if decoder is None or getattr(decoder, "ndim", None) != 2:
+        raise ValueError(f"{checkpoint} has no 2-D decoder.weight")
+    # nn.Linear(M, D).weight is (D, M); one feature direction is one column.
+    directions = decoder.detach().to(dtype=torch.float32, device="cpu").numpy().T
+    norms = np.linalg.norm(directions, axis=1)
+    finite = np.isfinite(directions).all(axis=1) & np.isfinite(norms)
+    if not finite.all():
+        bad = np.flatnonzero(~finite)
+        raise ValueError(
+            f"{checkpoint} has non-finite decoder directions for features "
+            f"{bad[:10].tolist()}")
+    nonzero = norms > 1e-12
+    normalized = directions[nonzero] / norms[nonzero, None]
+
+    method = "svd"
+    if len(normalized) == 0:
+        xy_live = np.empty((0, 2), dtype=np.float32)
+    elif len(normalized) < 5:
+        xy_live = _svd2d(normalized)
+    else:
+        try:
+            import umap
+
+            nn = min(int(n_neighbors), len(normalized) - 1)
+            xy_live = umap.UMAP(
+                n_components=2,
+                n_neighbors=max(2, nn),
+                min_dist=float(min_dist),
+                metric="cosine",
+                random_state=int(seed),
+            ).fit_transform(normalized).astype(np.float32, copy=False)
+            method = "umap"
+        except ImportError:
+            xy_live = _svd2d(normalized)
+
+    xy = np.zeros((len(directions), 2), dtype=np.float32)
+    xy[nonzero] = xy_live
+    zero_ids = np.flatnonzero(~nonzero)
+    if len(zero_ids):
+        # A zero decoder has no meaningful cosine position. Keep it visible without
+        # pretending it belongs to the learned cloud.
+        centre = xy_live.mean(axis=0) if len(xy_live) else np.zeros(2, dtype=np.float32)
+        radius = (float(np.linalg.norm(np.ptp(xy_live, axis=0))) * 0.62
+                  if len(xy_live) > 1 else 1.0)
+        radius = max(radius, 1.0)
+        angles = 2 * np.pi * np.arange(len(zero_ids)) / max(1, len(zero_ids))
+        xy[zero_ids, 0] = centre[0] + radius * np.cos(angles)
+        xy[zero_ids, 1] = centre[1] + radius * np.sin(angles)
+
+    by_id = (features.drop_duplicates("feature_id").set_index("feature_id")
+             if features is not None and "feature_id" in features else pd.DataFrame())
+
+    def _named(fid: int) -> bool:
+        if by_id.empty or fid not in by_id.index or "concept" not in by_id:
+            return False
+        value = by_id.at[fid, "concept"]
+        return not pd.isna(value) and bool(str(value).strip())
+
+    def _verified(fid: int) -> bool:
+        if by_id.empty or fid not in by_id.index or "fidelity_pass" not in by_id:
+            return False
+        return annotation_flag(by_id.at[fid, "fidelity_pass"])
+
+    points = [
+        {
+            "feature_id": int(fid),
+            "x": round(float(xy[fid, 0]), 5),
+            "y": round(float(xy[fid, 1]), 5),
+            "decoder_norm": round(float(norms[fid]), 6),
+            "zero_decoder": bool(not nonzero[fid]),
+        }
+        for fid in range(len(directions))
+    ]
+    return {
+        "n_total": int(len(directions)),
+        "n_named": int(sum(_named(fid) for fid in range(len(directions)))),
+        "n_verified": int(sum(_verified(fid) for fid in range(len(directions)))),
+        "n_zero_decoder": int(len(zero_ids)),
+        "projection": method,
+        "basis": "sae_decoder_direction",
+        "metric": "cosine",
+        "seed": int(seed),
+        "points": points,
+    }
+
+
+def _corpus_frame(corpus_path):
+    """Corpus rows with ids resolved, for either a corpus or a prepared table.
+
+    Tables that already carry an id are returned as read; only a prepared table
+    without one goes through ``load_corpus`` to have it synthesized.
+    """
+    frame = pd.read_parquet(corpus_path)
+    if {"battle_id", "instruction_id"} & set(frame.columns):
+        return frame
+    from prefscope.data.corpus import load_corpus
+    return load_corpus(corpus_path)
 
 
 def export_map(lens: Path, corpus_path: str, features: pd.DataFrame, *,
@@ -39,7 +189,7 @@ def export_map(lens: Path, corpus_path: str, features: pd.DataFrame, *,
               file=sys.stderr)
         return None
 
-    z = np.load(lens / Z_DIFF)
+    z = np.load(require_paired_codes(lens, command="the battle map"))
     battles = None
     if corpus_path:
         from prefscope.interpret.io import load_lens_battles
@@ -50,7 +200,7 @@ def export_map(lens: Path, corpus_path: str, features: pd.DataFrame, *,
 
     n = z.shape[0]
     rng = np.random.default_rng(seed)
-    verified = (features.loc[features.get("fidelity_pass", False) == True, "feature_id"]
+    verified = (features.loc[features["fidelity_pass"].map(annotation_flag), "feature_id"]
                 .astype(int).tolist() if "fidelity_pass" in features
                 else features["feature_id"].astype(int).tolist())
     vset = verified if verified else list(range(z.shape[1]))
@@ -157,10 +307,14 @@ def export_prompt_map(prompt_lens, completion_lens, delta_csv, prompt_interpret_
     (z_prompt) and the winner's completion features (oriented z_diff), with the cells
     that are significant in the aggregate Δ relation badged. See the design spec."""
     prompt_lens, completion_lens = Path(prompt_lens), Path(completion_lens)
+    _require_antisymmetric_codes(completion_lens, command="the prompt map")
     pint = Path(prompt_interpret_dir)
     zp = np.load(prompt_lens / Z_PROMPT)
-    zd = np.load(completion_lens / Z_DIFF)
+    zd = np.load(require_paired_codes(completion_lens, command="the prompt map"))
     pb, cb = _battle_ids_of(prompt_lens), _battle_ids_of(completion_lens)
+    if pd.Index(pb).has_duplicates or pd.Index(cb).has_duplicates:
+        raise ValueError(
+            "prompt and completion lens battle IDs must each be unique for alignment")
 
     # row-align the two lenses by battle id (same pattern as pipeline.prompt_delta)
     if len(pb) == len(cb) and bool((pb == cb).all()):
@@ -175,11 +329,11 @@ def export_prompt_map(prompt_lens, completion_lens, delta_csv, prompt_interpret_
 
     # battle metadata (prompt / winner / models): pull each column from whichever
     # source has it — the completion-lens battles or the corpus — keyed by battle id.
-    # (The difference lens's battles.parquet may not store prompt/model text.)
+    # (A packaged lens's battles.parquet may not store prompt/model text.)
     def _indexed(df):
         return df.set_index(df[battle_id_col(df)].astype(str))
     cbat = _indexed(pd.read_parquet(completion_lens / BATTLES))
-    corp = _indexed(pd.read_parquet(corpus_path)) if corpus_path else None
+    corp = _indexed(_corpus_frame(corpus_path)) if corpus_path else None
 
     def meta_col(name, default=""):
         """values aligned to the current `bids`, from lens battles else corpus."""
@@ -207,7 +361,7 @@ def export_prompt_map(prompt_lens, completion_lens, delta_csv, prompt_interpret_
     pnames = _concept_map(pint / "prompt_feature_names.csv")
     cnames = _concept_map(completion_lens / FEATURE_NAMES)
     pfid = _read_csv(pint / "prompt_feature_fidelity.csv")
-    verified = (pfid.loc[pfid.get("fidelity_pass", False) == True, "feature_id"]
+    verified = (pfid.loc[pfid["fidelity_pass"].map(annotation_flag), "feature_id"]
                 .astype(int).tolist() if pfid is not None and "fidelity_pass" in pfid else [])
     cand = [c for c in (verified or sorted(pnames) or list(range(zp.shape[1]))) if c < zp.shape[1]]
     candA = np.array(cand)
@@ -231,7 +385,8 @@ def export_prompt_map(prompt_lens, completion_lens, delta_csv, prompt_interpret_
     delta = _read_csv(Path(delta_csv)) if delta_csv else None
     dlook, dkeys = {}, set()
     if delta is not None and {"prompt_concept", "completion_feature"} <= set(delta.columns):
-        sig = (delta["stable"].astype(bool) & (delta["p_bonferroni"].astype(float) < 0.05)
+        sig = (delta["stable"].map(annotation_flag)
+               & (delta["p_bonferroni"].astype(float) < 0.05)
                if "stable" in delta and "p_bonferroni" in delta
                else pd.Series(False, index=delta.index))
         for pc_, cf_, dv, sg in zip(delta["prompt_concept"].astype(int),
@@ -239,8 +394,34 @@ def export_prompt_map(prompt_lens, completion_lens, delta_csv, prompt_interpret_
                                     delta["delta"].astype(float), sig):
             dlook[(int(pc_), int(cf_))] = (float(dv), bool(sg))
         dkeys = set(int(k) for k in delta["prompt_concept"].astype(int))
-    use_cluster = bool(f2c) and (clu_key is not None) and (
-        len(dkeys & set(int(c) for c in clu_key)) >= len(dkeys & set(int(d) for d in dom)))
+    declared_kind = None
+    declared_kind_invalid = False
+    if delta is not None and "prompt_unit_kind" in delta.columns:
+        kinds = set(delta["prompt_unit_kind"].dropna().astype(str).str.casefold())
+        if len(kinds) == 1 and next(iter(kinds)) in {"feature", "cluster"}:
+            declared_kind = next(iter(kinds))
+        else:
+            declared_kind_invalid = True
+    cluster_overlap = (
+        len(dkeys & set(int(c) for c in clu_key))
+        if clu_key is not None else 0)
+    feature_overlap = len(dkeys & set(int(d) for d in dom))
+    if declared_kind_invalid:
+        use_cluster = False
+        dlook = {}
+    elif declared_kind == "cluster":
+        use_cluster = bool(f2c) and clu_key is not None
+        if not use_cluster:
+            dlook = {}
+    elif declared_kind == "feature":
+        use_cluster = False
+    elif cluster_overlap == feature_overlap and cluster_overlap:
+        # Legacy artifacts do not declare their keyspace. On an ambiguous tie,
+        # suppress badges instead of silently attaching a result to the wrong concept.
+        use_cluster = False
+        dlook = {}
+    else:
+        use_cluster = bool(f2c) and clu_key is not None and cluster_overlap > feature_overlap
     point_concept = clu_key if use_cluster else dom
 
     # sample (ties already dropped)
@@ -331,7 +512,7 @@ def export_response_map(lens, corpus_path, features, *, sample: int = 2500,
     lb = pd.read_parquet(lens / BATTLES)
     ids = lens_battle_ids(lb)
     N = len(ids)
-    corp = pd.read_parquet(corpus_path) if corpus_path else None
+    corp = _corpus_frame(corpus_path) if corpus_path else None
     if corp is not None:
         corp = corp.set_index(corp[battle_id_col(corp)].astype(str))
 
@@ -344,7 +525,7 @@ def export_response_map(lens, corpus_path, features, *, sample: int = 2500,
     prompts, ca, cb = col("prompt"), col("completion_a"), col("completion_b")
     ma, mb = col("model_a"), col("model_b")
 
-    verified = (features.loc[features.get("fidelity_pass", False) == True, "feature_id"]
+    verified = (features.loc[features["fidelity_pass"].map(annotation_flag), "feature_id"]
                 .astype(int).tolist() if "fidelity_pass" in features
                 else features["feature_id"].astype(int).tolist())
     vset = verified if verified else list(range(Z.shape[1]))
@@ -385,7 +566,8 @@ def export_response_map(lens, corpus_path, features, *, sample: int = 2500,
 
     pts = []
     for k, j in enumerate(idx):
-        b = int(j % N); is_a = (not paired) or j < N
+        b = int(j % N)
+        is_a = (not paired) or j < N
         pts.append({"x": round(float(xy[k, 0]), 3), "y": round(float(xy[k, 1]), 3),
                     "f": int(top_fid[k]) if anyf[k] else -1,
                     "m": round(float(mags[k]), 3) if anyf[k] else 0.0,

@@ -1,16 +1,15 @@
 # Build a lens and analyze a dataset by concept
 
 Goal: take a set of pairwise battles, train a lens over it, and produce the four
-concept tables (names, fidelity, clusters, win-relevance) that tell you *what
-concepts the data contains and which ones humans/judges reward*.
+concept tables for names, name checks, clusters, and preference associations.
 
 ## 0. Prerequisites
 
 ```bash
-uv sync --extra arena          # HuggingFace arena loaders (only needed for build-corpus)
-uv sync --extra cluster        # igraph + leidenalg for the default mi-leiden clusterer
-# GPU torch for embedding + SAE training, e.g.:
-uv sync --extra cu121          # NVIDIA   (or --extra rocm / --extra cpu)
+uv sync --extra arena          # Hugging Face arena loaders (only needed for build-corpus)
+uv sync --extra cluster        # igraph + leidenalg for Leiden feature clustering
+# Install a hardware-matched PyTorch build first; or use the generic CPU/MPS extra:
+uv sync --extra cpu
 export OPENROUTER_API_KEY=...  # for the naming/verification LLM calls
 ```
 
@@ -36,23 +35,24 @@ Sanity-check it first (fast, no model load):
 prefscope inspect --corpus corpus.parquet
 ```
 
-## 2. Build the lens (this is the embedding step)
+## 2. Build the lens
 
-`build-lens` embeds every completion (vectors are cached and reusable) and trains
+`build-lens` embeds every response, caches the vectors, and trains
 a BatchTopK SAE. The lens is **unsupervised** — no labels needed to train it.
 
 ```bash
 prefscope build-lens \
     --corpus corpus.parquet \
-    --input-rep individual \            # encoder applies to any single response
+    --input-rep individual \
     --out lenses/mylens \
-    --m-total 128 --k 16 \              # 128 features, 16 active per row
-    --dump-embeddings emb/ \            # cache vectors so re-fits skip re-embedding
+    --m-total 128 --k 16 \
+    --dump-embeddings emb/ \
     --device cuda
 ```
 
 `--input-rep`:
-- **`individual`** — trains on pooled `[e_a; e_b]`; writes `z_a/z_b/z_diff`. The
+- **`individual`** — trains on the combined set of A and B response embeddings and
+  writes `z_a`, `z_b`, and `z_diff`. The
   encoder works on a lone response, which is what diagnosis/inference need. Prefer this.
 - **`difference`** — trains on `e_a − e_b`; writes only `z_diff`. A pure contrast
   lens (can't score a single response).
@@ -80,7 +80,14 @@ stages: [name, verify, cluster, win-relevance]
 llm: {backend: openai, model: deepseek/deepseek-v3.2}
 interpreter: {name: auto, n_active: 12}
 verifier:    {name: auto, n_per_bucket: 12}
-clusterer:   {name: mi-leiden, resolution: 1.2, knn: 6}
+clusterer:
+  name: cofire-leiden
+  resolution: 5.0
+  knn: 8
+  knn_mode: mutual
+  pole: positive
+  min_cooccur: 30
+  cluster_on: individual
 win_relevance: {all_features: false}    # restrict to fidelity-passing axes
 ```
 
@@ -88,10 +95,9 @@ win_relevance: {all_features: false}    # restrict to fidelity-passing axes
 prefscope run --config pipeline.yaml
 ```
 
-This runs `name → verify → cluster → win-relevance`, resolving each component
-through the registry and threading outputs. Equivalent to running the four
-subcommands by hand (`interpret name`, `interpret verify`, `cluster-features`,
-`win-relevance`) — the config is just the declarative front-end.
+This runs `name → verify → cluster → win-relevance` in order and passes each output to
+the next step. It is equivalent to running `interpret name`, `interpret verify`,
+`cluster-features`, and `win-relevance` yourself.
 
 ### What you get (under `out_dir`)
 
@@ -122,12 +128,15 @@ Run a subset by listing fewer `stages` (e.g. `[name, verify]`).
 
 ```bash
 uv sync --extra viewer
-uv run --extra viewer streamlit run prefscope/viewer/app.py -- \
+prefscope-view \
     --lens-dir lenses/mylens
 ```
 
-`feature_names.csv` / `feature_fidelity.csv` in the lens dir are picked up
-automatically. The lens dir is small — sync it to a laptop and run the viewer locally.
+`run` writes the concept tables under `out_dir`, not into the lens dir. The viewer and
+`--names`/`--fidelity` flags read them from wherever you point them; pass
+`--names results/mylens/feature_names.csv --fidelity results/mylens/feature_fidelity.csv`,
+or copy the tables into the lens dir so they travel with it. The lens dir is small —
+sync it to a laptop and run the viewer locally.
 
 ## Prompt lenses
 
@@ -150,3 +159,5 @@ stages: [name, verify, cluster]         # win-relevance is completion-only
 Outputs use the `prompt_feature_*` filenames. To relate the two — *which prompt
 concepts elicit which response concepts* — see the `elicit` and `conditional-delta`
 subcommands (`prefscope elicit --help`).
+
+Return to the [documentation home](../index.md).

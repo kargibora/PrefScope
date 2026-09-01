@@ -1,8 +1,10 @@
 import numpy as np
+import pytest
 import torch
 
 from prefscope.sae.train import train_sae
 from prefscope.encode.sae import SAEProjector
+from prefscope.sae.model import BatchTopKSAE, NonnegativeBatchTopKSAE
 
 
 def _data(n=240, d=8, seed=0):
@@ -20,8 +22,28 @@ def test_train_returns_model_config_log():
     assert config["input_dim"] == 8
     assert config["m_total_neurons"] == 8
     assert config["k_active_neurons"] == 2
+    assert config["optimizer"] == "adam"
+    assert config["weight_decay"] == 0.0
+    assert config["activation_polarity"] == "signed"
     assert len(log) == 8
     assert log[-1]["val_norm_mse"] < log[0]["val_norm_mse"]
+    assert log[-1]["val_ev"] == pytest.approx(1.0 - log[-1]["val_norm_mse"])
+    assert config["calibration_l0"] == pytest.approx(2.0, rel=0.05)
+    assert config["deployment_val_explained_variance"] == pytest.approx(
+        1.0 - config["deployment_val_norm_mse"])
+
+
+def test_auto_individual_uses_nonnegative_batchtopk_without_matryoshka():
+    X = _data()
+    model, config, _ = train_sae(
+        X[:200], X[200:], m_total=8, k=2, input_rep="individual",
+        n_epochs=2, min_epochs=2, patience=2, batch=64, device="cpu", seed=0)
+    assert isinstance(model, NonnegativeBatchTopKSAE)
+    assert config["sae_type"] == "batchtopk-relu"
+    assert config["activation_polarity"] == "nonnegative"
+    assert config["code_semantics"] == "presence"
+    assert config["matryoshka_prefix_lengths"] == []
+    assert (model.encode(torch.from_numpy(X[:12])) >= 0).all()
 
 
 def test_train_per_batch_loop_is_numerically_identical():
@@ -113,3 +135,20 @@ def test_trained_checkpoint_loads_in_projector(tmp_path):
     bad = np.zeros((4, proj.input_dim + 1), dtype=np.float32)
     with pytest.raises(ValueError, match="input_dim"):
         proj.project(bad)
+
+
+def test_legacy_checkpoint_without_sae_type_remains_signed(tmp_path):
+    """The v1 fallback must preserve the numerical meaning of old artifacts."""
+    torch.manual_seed(3)
+    model = BatchTopKSAE(input_dim=8, m_total_neurons=8, k_active_neurons=2)
+    model.threshold.fill_(0.25)
+    config = {"input_dim": 8, "m_total_neurons": 8, "k_active_neurons": 2}
+    ckpt = tmp_path / "sae_model.pt"
+    torch.save({"state_dict": model.state_dict(), "config": config}, ckpt)
+    proj = SAEProjector(ckpt)
+    X = _data(n=20)
+    with torch.no_grad():
+        expected = model.eval().encode(torch.from_numpy(X)).numpy()
+    np.testing.assert_array_equal(proj.project(X), expected)
+    assert proj.sae_type == "batchtopk"
+    assert proj.activation_polarity == "signed"

@@ -51,16 +51,12 @@ def test_projector_loads_from_dir(tmp_path):
     assert proj.m_total == 2
 
 
-import pytest
-from prefscope.config import CONFIG
-
-
-@pytest.mark.slow
-def test_real_frozen_sae_shapes():
-    if not (CONFIG.frozen_sae_dir / "sae_model.pt").exists():
-        pytest.skip("frozen SAE checkpoint not present")
-    proj = SAEProjector(CONFIG.frozen_sae_dir)
-    assert proj.m_total == 128
-    assert proj.input_dim == 1024
-    z = proj.project(np.zeros((4, 1024), dtype=np.float32))
-    assert z.shape == (4, 128)
+def test_projector_rejects_missing_inference_threshold(tmp_path):
+    ckpt = tmp_path / "sae_model.pt"
+    _fake_checkpoint(ckpt)
+    payload = torch.load(ckpt, weights_only=True)
+    del payload["state_dict"]["threshold"]
+    torch.save(payload, ckpt)
+    import pytest
+    with pytest.raises(ValueError, match="threshold"):
+        SAEProjector(ckpt)

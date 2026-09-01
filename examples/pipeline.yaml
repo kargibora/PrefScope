@@ -5,6 +5,9 @@
 # clustering algorithm, edit the one line below (run `prefscope cluster-features --help`
 # or read the registry for the available names). Set `lens_kind: prompt` for a prompt lens.
 
+# Trusted third-party components can be activated explicitly:
+# plugins: [my_package.prefscope_plugin]
+
 lens_dir: lenses/indiv_8b              # frozen completion lens (z_diff/z_a/z_b + manifest)
 corpus: corpora/arena_merged.parquet  # needed by win-relevance (human_pref); also used to
                                       # re-attach prompt/completion text for naming

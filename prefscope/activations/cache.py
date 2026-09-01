@@ -28,14 +28,34 @@ class ActivationCache:
     """
 
     def __init__(self, root, hidden_dim: int, dtype: str = "float16") -> None:
-        self.root = Path(root)
+        self.root = self.ensure_empty_output(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.hidden_dim = int(hidden_dim)
         self.dtype = dtype
         self._rows: list[dict] = []
         self._n = 0
-        self._fh = open(self.root / _ACTS, "wb")
+        # Exclusive creation closes the race between the emptiness check and open().
+        # Never truncate a prior cache merely by constructing a writer.
+        self._fh = open(self.root / _ACTS, "xb")
         self._finalized = False
+
+    @staticmethod
+    def ensure_empty_output(root) -> Path:
+        """Return ``root`` if it is absent/empty; refuse implicit replacement.
+
+        Activation extraction can take hours. Accidentally reusing ``--out`` must not
+        truncate a completed cache before the new run has produced anything.
+        """
+        root = Path(root)
+        if root.exists():
+            if not root.is_dir():
+                raise FileExistsError(
+                    f"activation cache output exists and is not a directory: {root}")
+            if any(root.iterdir()):
+                raise FileExistsError(
+                    f"activation cache output is not empty: {root}; choose a new "
+                    "directory or remove the existing output explicitly")
+        return root
 
     def append(self, vectors: np.ndarray, rows: list[dict]) -> None:
         if getattr(self, "_finalized", True):
@@ -97,9 +117,35 @@ def train_val_row_indices(n_tokens: int, val_frac: float,
     subsampled to that many rows (a reservoir cap that bounds GPU/disk traffic
     and is the scale-up knob for the full corpus).
     """
+    if isinstance(n_tokens, (bool, np.bool_)) or not isinstance(
+        n_tokens, (int, np.integer)
+    ):
+        raise ValueError("n_tokens must be an integer")
+    n_tokens = int(n_tokens)
+    if n_tokens < 2:
+        raise ValueError("n_tokens must be at least 2 to create train and validation sets")
+    try:
+        val_frac = float(val_frac)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("val_frac must be a finite number strictly between 0 and 1") from exc
+    if not np.isfinite(val_frac) or not 0.0 < val_frac < 1.0:
+        raise ValueError("val_frac must be a finite number strictly between 0 and 1")
+    if max_train_tokens is not None:
+        if isinstance(max_train_tokens, (bool, np.bool_)) or not isinstance(
+            max_train_tokens, (int, np.integer)
+        ):
+            raise ValueError("max_train_tokens must be a positive integer or None")
+        max_train_tokens = int(max_train_tokens)
+        if max_train_tokens < 1:
+            raise ValueError("max_train_tokens must be a positive integer or None")
+
     rng = np.random.default_rng(seed)
     perm = rng.permutation(n_tokens)
     n_val = int(round(val_frac * n_tokens))
+    if not 0 < n_val < n_tokens:
+        raise ValueError(
+            f"val_frac={val_frac} yields {n_val} validation rows for {n_tokens} tokens; "
+            "choose a fraction that leaves both train and validation rows")
     val = np.sort(perm[:n_val])
     train = perm[n_val:]
     if max_train_tokens is not None and len(train) > max_train_tokens:

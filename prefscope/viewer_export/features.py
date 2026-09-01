@@ -7,15 +7,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from prefscope.analysis.presence import annotation_flag
 from prefscope.artifacts import (
-    FEATURE_FIDELITY, FEATURE_NAMES, MANIFEST, WIN_RELEVANCE,
+    FEATURE_CALIBRATION, FEATURE_CONTEXT, FEATURE_FIDELITY, FEATURE_NAMES, FEATURE_ROLES,
+    MANIFEST, WIN_RELEVANCE,
 )
+from prefscope.core.manifest import LensManifest
 
 from .sanitize import _read_csv
 
 
 def export_meta(lens: Path, validation, features) -> dict:
     manifest = json.loads((lens / MANIFEST).read_text())
+    input_rep = LensManifest.from_dict(manifest).input_rep
     ev = None
     log = lens / "sae_training_log.csv"
     if log.exists():
@@ -42,8 +46,8 @@ def export_meta(lens: Path, validation, features) -> dict:
             ss_tot = float(((yv - yv.mean()) ** 2).sum())
             r2 = float(1 - resid @ resid / ss_tot) if ss_tot > 0 else None
     loo_r2 = r2 if is_loo else None
-    n_verified = int(features["fidelity_pass"].sum()) if features is not None \
-        and "fidelity_pass" in features else None
+    n_verified = int(features["fidelity_pass"].map(annotation_flag).sum()) \
+        if features is not None and "fidelity_pass" in features else None
     # n_named = features actually surfaced (named). The verified fraction should read against
     # this, NOT m_total (the SAE width) — "45/2048" wrongly looks like 98% is broken.
     n_named = int(len(features)) if features is not None else None
@@ -55,7 +59,8 @@ def export_meta(lens: Path, validation, features) -> dict:
         c in features.columns for c in ("delta_win_rate", "win_assoc"))
     return {
         "lens": lens.name,
-        "input_rep": manifest.get("input_rep"),   # let the viewer describe the RIGHT lens
+        "input_rep": input_rep,   # let the viewer describe the RIGHT lens
+        "dataset_mode": manifest.get("dataset_mode", "paired"),
         "embed_model_id": manifest.get("embed_model_id"),
         "m_total": manifest.get("m_total"),
         "k": manifest.get("k"),
@@ -72,20 +77,40 @@ def export_meta(lens: Path, validation, features) -> dict:
     }
 
 
-def export_features(lens: Path) -> pd.DataFrame:
-    names = _read_csv(lens / FEATURE_NAMES)
-    fid = _read_csv(lens / FEATURE_FIDELITY)
-    wr = _read_csv(lens / WIN_RELEVANCE)
-    base = names if names is not None else fid
-    df = base[["feature_id"]].copy()
+def export_features(lens: Path, analysis_dir: Path | str | None = None) -> pd.DataFrame:
+    """Assemble the viewer's feature catalog from a lens and its analysis outputs.
+
+    Arrays and the manifest always come from ``lens``.  Interpretation tables normally
+    live in a separate run directory, so ``analysis_dir`` is authoritative when given;
+    refusing to fall back to the lens prevents stale tables from two runs being mixed.
+    """
+    lens = Path(lens)
+    analysis = Path(analysis_dir) if analysis_dir is not None else lens
+    names = _read_csv(analysis / FEATURE_NAMES)
+    fid = _read_csv(analysis / FEATURE_FIDELITY)
+    roles = _read_csv(analysis / FEATURE_ROLES)
+    wr = _read_csv(analysis / WIN_RELEVANCE)
+    # The feature catalog inventories the SAE, not merely the subset interpreted in
+    # one run. This keeps unnamed and failed axes visible in the feature atlas and makes
+    # partially completed, resumable interpretation runs explicit.
+    manifest = LensManifest.from_dict(json.loads((lens / MANIFEST).read_text()))
+    width = int(manifest.m_total or 0)
+    if width <= 0:
+        candidates = [
+            int(pd.to_numeric(table["feature_id"], errors="coerce").max()) + 1
+            for table in (names, fid)
+            if table is not None and "feature_id" in table and len(table)
+        ]
+        width = max(candidates, default=0)
+    df = pd.DataFrame({"feature_id": np.arange(width, dtype=int)})
     if names is not None and "concept" in names:
         df = df.merge(names[["feature_id", "concept"]], on="feature_id", how="left")
-    # optional coarse type (capability/format/style/topic/safety) from label_feature_types
-    types = _read_csv(lens / "feature_types.csv")
+    # Backward compatibility for early bundles that carried a coarse feature_types.csv.
+    types = _read_csv(analysis / "feature_types.csv")
     if types is not None and "type" in types:
         df = df.merge(types[["feature_id", "type"]], on="feature_id", how="left")
     # optional length-confound flag (bias screen): a "does more" that's really "does longer"
-    bias = _read_csv(lens / "bias_screen.csv")
+    bias = _read_csv(analysis / "bias_screen.csv")
     if bias is not None and "corr_confound_len" in bias:
         keep = [c for c in ["feature_id", "corr_confound_len", "confound_entangled"] if c in bias]
         df = df.merge(bias[keep], on="feature_id", how="left")
@@ -97,6 +122,52 @@ def export_features(lens: Path) -> pd.DataFrame:
                             "fp_rate", "agreement"] if c in fid.columns]
         df = df.merge(fid[keep].rename(columns={"n": "fidelity_n"}),
                       on="feature_id", how="left")
+    if roles is not None:
+        keep = [c for c in [
+            "feature_id", "classification_status", "semantic_role", "semantic_family",
+            "role_confidence", "role_agreement", "prompt_relation",
+            "relation_agreement", "requested_share", "elicited_share",
+            "prompt_driven_share", "independent_share", "prompt_scope",
+            "behavior_scope", "feature_summary", "n_examples", "n_labelled",
+            "n_present", "label_coverage", "concept_present_rate",
+        ] if c in roles.columns]
+        df = df.merge(roles[keep].drop_duplicates("feature_id"),
+                      on="feature_id", how="left")
+        if "behavior_scope" in df.columns:
+            role_category = df["behavior_scope"].map({
+                "candidate_cross_prompt_behavior": "general",
+                "context_conditional_behavior": "context_specific",
+                "prompt_content": "prompt_content",
+            })
+            df["behavior_category"] = role_category.fillna("unclassified")
+    calibration = _read_csv(analysis / FEATURE_CALIBRATION)
+    if calibration is not None:
+        keep = [c for c in [
+            "feature_id", "calibration_status", "semantic_threshold",
+            "threshold_quantile", "precision_lcb", "semantic_coverage",
+            "silent_concept_rate", "semantic_role", "requested_share",
+            "presence_pass",
+        ] if c in calibration.columns]
+        keep = [c for c in keep if c == "feature_id" or c not in df.columns]
+        df = df.merge(calibration[keep].drop_duplicates("feature_id"),
+                      on="feature_id", how="left")
+    context = _read_csv(analysis / FEATURE_CONTEXT)
+    if context is not None:
+        keep = [c for c in [
+            "feature_id", "semantic_presence_rate", "prompt_dependence_nmi",
+            "prompt_context_js", "effective_prompt_contexts",
+            "max_prompt_context_share", "n_supported_prompt_contexts",
+            "paired_choice_ratio", "behavior_category", "top_prompt_contexts_json",
+        ] if c in context.columns]
+        context_table = context[keep].drop_duplicates("feature_id")
+        if "behavior_category" in context_table.columns and "behavior_category" in df.columns:
+            context_table = context_table.rename(
+                columns={"behavior_category": "_context_behavior_category"})
+        df = df.merge(context_table, on="feature_id", how="left")
+        if "_context_behavior_category" in df.columns:
+            df["behavior_category"] = df["_context_behavior_category"].combine_first(
+                df["behavior_category"])
+            df = df.drop(columns="_context_behavior_category")
     if wr is not None:
         # win_assoc is the RAW gap; delta_win_rate is the length-controlled AME
         # (WIMHF App. A.2) — the honest quantity. Carry both + their n + significance.
@@ -109,7 +180,8 @@ def export_features(lens: Path) -> pd.DataFrame:
     return df
 
 
-def feature_fire_rate(lens: Path, *, chunk: int = 20000) -> dict[int, float]:
+def feature_fire_rate(lens: Path, features: pd.DataFrame | None = None, *,
+                      chunk: int = 20000) -> dict[int, float]:
     """Per completion feature: **pervasiveness** = the fraction of responses it fires in.
 
     This is our ``generality`` signal. A behaviour that appears in a large fraction of
@@ -121,19 +193,30 @@ def feature_fire_rate(lens: Path, *, chunk: int = 20000) -> dict[int, float]:
     negative code is the opposite pole, not presence), over both responses of every battle.
 
     Returns ``{feature_id: rate}`` over all axes, or ``{}`` for a difference lens (no
-    per-side codes — a lone response's activation can't be defined there)."""
+    per-side codes — a lone response's activation can't be defined there). Single-response
+    lenses are rated over their one side."""
     za_p, zb_p = lens / "z_a.npy", lens / "z_b.npy"
-    if not (za_p.exists() and zb_p.exists()):
+    if not za_p.exists():
         return {}
+    sides = [za_p] + ([zb_p] if zb_p.exists() else [])
+    from .presence import feature_thresholds
+
     counts = None
     n = 0
-    for p in (za_p, zb_p):
+    for p in sides:
         arr = np.load(p, mmap_mode="r")
         if counts is None:
             counts = np.zeros(arr.shape[1], dtype=np.int64)
+            feats = list(range(arr.shape[1]))
+            thresholds, calibrated = feature_thresholds(
+                features if features is not None else pd.DataFrame({"feature_id": feats}),
+                feats)
         for s in range(0, arr.shape[0], chunk):
             block = np.asarray(arr[s:s + chunk])
-            counts += (block > 0).sum(axis=0)   # +pole = concept present (not != 0)
+            present = block > 0
+            if calibrated.any():
+                present[:, calibrated] = block[:, calibrated] >= thresholds[calibrated]
+            counts += present.sum(axis=0)
             n += block.shape[0]
     if not n:
         return {}
@@ -156,7 +239,7 @@ def feature_prompt_types(elic_csv) -> dict[int, int]:
     for cy, g in d.groupby("completion_feature"):
         sig = g
         if has_sig:
-            sig = sig[sig["significant"].astype(bool)]
+            sig = sig[sig["significant"].map(annotation_flag)]
         if has_lift:
             sig = sig[sig["lift"] > 1.0]
         out[int(cy)] = int(sig["prompt_feature"].nunique())

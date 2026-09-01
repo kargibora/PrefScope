@@ -20,14 +20,16 @@ def test_filter_outlier_rows_keeps_all_when_uniform():
 
 
 class _StubTokenizer:
-    """Minimal apply_chat_template stub: 1 token per word, assistant appends words."""
+    """Minimal prefix-consistent chat template with one assistant-header token."""
+
     def apply_chat_template(self, messages, add_generation_prompt=False,
                             tokenize=True, **kw):
-        ids = []
-        for m in messages:
-            ids += [hash(w) % 1000 for w in m["content"].split()]
-        if add_generation_prompt:
-            ids += [999]  # a generation-prompt marker token
+        ids = list(range(1, len(messages[0]["content"].split()) + 1))
+        if len(messages) == 2:
+            ids += [999]
+            ids += list(range(100, 100 + len(messages[1]["content"].split())))
+        elif add_generation_prompt:
+            ids += [999]
         return ids
 
 
@@ -37,6 +39,7 @@ def test_build_chat_inputs_boundary():
     assert out["resp_start"] == 4
     assert out["resp_end"] == out["resp_start"] + 3
     assert len(out["input_ids"]) == out["resp_end"]
+    assert out["input_ids"].count(999) == 1
 
 
 def test_build_chat_inputs_truncates_to_max_tokens():
@@ -62,3 +65,17 @@ def test_build_chat_inputs_rejects_non_prefix_tokenizer():
 
     with pytest.raises(ValueError):
         build_chat_inputs(_NonPrefixTokenizer(), "a b c", "d e f", max_tokens=128)
+
+
+def test_build_chat_inputs_rejects_generation_prefix_mismatch():
+    import pytest
+
+    class _MismatchedAssistantHeader:
+        def apply_chat_template(self, messages, add_generation_prompt=False,
+                                tokenize=True, **kw):
+            if len(messages) == 1:
+                return [1, 2, 9] if add_generation_prompt else [1, 2]
+            return [1, 2, 8, 3, 4]
+
+    with pytest.raises(ValueError, match="generation-prefix-consistent"):
+        build_chat_inputs(_MismatchedAssistantHeader(), "a", "b", max_tokens=128)

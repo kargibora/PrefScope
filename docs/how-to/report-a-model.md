@@ -1,20 +1,22 @@
 # Report a model's concept profile
 
-Goal: from a set of battles (prompts + answers) and a named, verified lens, get a
-readable **concept report card** for one model — the concepts it most/least
-distinguishes itself from opponents on, which preferred concepts it under-expresses,
-and which prompt types it's strong or weak on. (The CLI report's per-feature rate is a
-target-minus-opponent *contrast*, not absolute prevalence — the viewer's report card
-shows absolute prevalence `P(z>0)` from an individual lens.)
+Use this guide to make a readable concept report for one model. The report compares the
+model with its opponents on matched prompts. It can show common differences, missing
+preference-associated concepts, and prompt types where the pattern changes.
 
-This is a presentation layer over [diagnosis](diagnose-a-model.md): same per-feature
-signals, assembled into one report.
+The report command shows model-minus-opponent differences. It does not show absolute
+concept prevalence. The viewer can show absolute prevalence when you use an individual
+lens.
+
+This report is a presentation layer over [diagnosis](diagnose-a-model.md).
 
 ## Prerequisites
 
-- A built lens with concept names + fidelity ([build & analyze](build-and-analyze-a-lens.md)) — `feature_names.csv` / `feature_fidelity.csv`.
-- Battles where your model played (a corpus parquet or OpenJury annotation JSON), with `model_a`/`model_b` so the model can be oriented as "self".
-- *Optional:* a `win_relevance.csv` (to surface **rewarded gaps**) and a prompt lens (to add the **prompt-types** section).
+- A lens with concept names and `feature_fidelity.csv`. See
+  [Build and analyze a lens](build-and-analyze-a-lens.md).
+- A corpus or OpenJury annotation file with `model_a` and `model_b`.
+- Optional: `win_relevance.csv` for preference-associated gaps.
+- Optional: a prompt lens for the prompt-types section.
 
 ## Run it
 
@@ -22,10 +24,10 @@ signals, assembled into one report.
 prefscope report \
     --lens-dir lenses/mylens --model my-model \
     --corpus battles.parquet \
-    --names lenses/mylens/feature_fidelity.csv \
+    --names results/mylens/feature_fidelity.csv \
     --win-relevance results/mylens/win_relevance.csv \
     --prompt-lens lenses/promptlens \
-    --prompt-names lenses/promptlens/prompt_feature_names.csv \
+    --prompt-names results/promptlens/prompt_feature_names.csv \
     --out report.md --device cuda
 ```
 
@@ -84,13 +86,13 @@ types with too few battles. The embedder is read from the lens manifest — see 
 ## Interactive version (web viewer)
 
 The same report card is available, interactively, in the web viewer (the *Report card*
-tab) when you export a bundle with `scripts/export_viewer_data.py`. It renders every
+tab) when you export a bundle with `prefscope-export-viewer`. It renders every
 section as charts and makes the **prompt types clickable** — clicking a prompt type
 shows sample battles of that model on that prompt type (its answer vs the opponent's,
 with the outcome). Pass `--report-battles` to populate that drill-in:
 
 ```bash
-python scripts/export_viewer_data.py --lens-dir lenses/mylens --corpus battles.parquet \
+prefscope-export-viewer --lens-dir lenses/mylens --corpus battles.parquet \
     --prompt-lens lenses/promptlens --completion-lens lenses/mylens \
     --prompt-interpret-dir results/promptlens \
     --out viewer-data --report-battles

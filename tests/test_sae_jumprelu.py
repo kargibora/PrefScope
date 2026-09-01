@@ -2,6 +2,7 @@
 import math
 
 import numpy as np
+import pytest
 import torch
 
 from prefscope.encode.sae import SAEProjector
@@ -24,6 +25,8 @@ def test_jumprelu_trains_and_projects_one_sided(tmp_path):
     assert isinstance(model, JumpReLUSAE)
     assert config["sae_type"] == "jumprelu"
     assert "sparsity_coef" in config and "bandwidth" in config
+    assert config["activation_polarity"] == "nonnegative"
+    assert config["optimizer"] == "adam" and config["weight_decay"] == 0.0
 
     # round-trip through the frozen projector (the inference path used downstream)
     ckpt = tmp_path / "sae_model.pt"
@@ -51,7 +54,35 @@ def test_jumprelu_thresholds_learn():
 
 
 def test_unknown_sae_type_still_rejected():
-    import pytest
     with pytest.raises(ValueError, match="jumprelu"):
         train_sae(_data()[:160], _data()[160:], sae_type="nope",
                   n_epochs=1, device="cpu")
+
+
+def test_jumprelu_relus_preactivations_and_updates_firing_counters():
+    model = JumpReLUSAE(input_dim=4, m_total_neurons=6, k_active_neurons=2)
+    with torch.no_grad():
+        model.encoder.weight.zero_()
+        model.neuron_bias.fill_(-2.0)
+    model.train()
+    _, info = model(torch.ones(3, 4))
+    assert torch.equal(info["pre"], torch.zeros_like(info["pre"]))
+    assert torch.equal(info["activations"], torch.zeros_like(info["activations"]))
+    assert (model.steps_since_activation == 1).all()
+
+
+def test_jumprelu_rejects_matryoshka_instead_of_silently_ignoring_it():
+    X = _data()
+    with pytest.raises(ValueError, match="not supported for jumprelu"):
+        train_sae(X[:160], X[160:], m_total=24, k=4,
+                  matryoshka_prefix=(8,), sae_type="jumprelu",
+                  n_epochs=1, device="cpu")
+
+
+def test_jumprelu_records_sparsity_warmup():
+    X = _data()
+    model, config, _ = train_sae(
+        X[:160], X[160:], m_total=24, k=4, sae_type="jumprelu",
+        sparsity_warmup_steps=3, n_epochs=1, batch=32, device="cpu")
+    assert config["sparsity_warmup_steps"] == 3
+    assert model.sparsity_scale == 1.0

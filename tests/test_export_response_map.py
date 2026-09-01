@@ -1,14 +1,10 @@
 """export_response_map: one point per single response (A/B), not per A/B pair."""
-import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT))
-from export_viewer_data import export_response_map  # noqa: E402
+from prefscope.viewer_export import export_response_map
 
 
 def test_response_map_is_per_response(tmp_path):

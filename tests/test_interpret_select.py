@@ -1,7 +1,7 @@
 import numpy as np
 
 from prefscope.interpret.select import (
-    name_verify_split, top_pairs, holdout_buckets,
+    name_verify_split, split_group_ids, top_pairs, holdout_buckets,
 )
 
 
@@ -13,6 +13,19 @@ def test_name_verify_split_disjoint_and_deterministic():
     assert not (nm1 & vm1).any()
     assert np.array_equal(nm1 | vm1, np.ones(200, bool))
     assert 20 < vm1.sum() < 60
+
+
+def test_split_groups_repeated_prompt_rows_together():
+    import pandas as pd
+    frame = pd.DataFrame({
+        "instruction_id": ["battle-a", "battle-b", "battle-c"],
+        "prompt": ["same request", "same request", "different request"],
+    })
+    ids = split_group_ids(frame)
+    assert ids[0] == ids[1] and ids[0] != ids[2]
+    name, verify = name_verify_split(ids)
+    assert bool(name[0]) == bool(name[1])
+    assert bool(verify[0]) == bool(verify[1])
 
 
 def test_top_pairs_picks_highest_positive_and_zeros_from_pool():
@@ -45,6 +58,17 @@ def test_holdout_buckets_stratified_random_spans_non_extreme_rows():
     assert set(out["neg"]) != set(range(90, 100))
 
 
+def test_holdout_buckets_quantile_stratified_covers_weak_and_strong():
+    z = np.concatenate([np.arange(1, 101), -np.arange(1, 101), np.zeros(20)])
+    out = holdout_buckets(
+        z, np.arange(len(z)), n_per_bucket=10,
+        rng=np.random.default_rng(4), sampling="quantile-stratified")
+    pos_values = z[out["pos"]]
+    neg_magnitudes = np.abs(z[out["neg"]])
+    assert pos_values.min() <= 20 and pos_values.max() >= 80
+    assert neg_magnitudes.min() <= 20 and neg_magnitudes.max() >= 80
+
+
 def test_close_silent_order_prefers_similar_other_concepts():
     from prefscope.interpret.select import close_silent_order
     # feature 0 is being named; its activators also express concept 1.
@@ -69,3 +93,35 @@ def test_close_negatives_sampler_is_registered():
                            active_idx=[2, 3], embeddings=emb, rng=np.random.default_rng(0))
     assert len(out) == 2
     assert all(z[i] == 0 for i in out)      # negatives are silent, and it did not crash
+
+
+def test_close_negatives_indexes_bounded_float32_rows_not_full_embedding_matrix():
+    """Regression: prompt verification used to cast the full (N, 4096) embedding
+    memmap to float64 once per feature, allocating 7+ GiB on the real corpus."""
+    from prefscope.interpret.select import select_negatives
+
+    class IndexedOnly:
+        def __init__(self, data):
+            self.data = data
+            self.requests = []
+
+        def __array__(self, *args, **kwargs):
+            raise AssertionError("the full embedding matrix must not be materialized")
+
+        def __getitem__(self, rows):
+            self.requests.append(len(np.atleast_1d(rows)))
+            return self.data[rows]
+
+    n, d = 5_002, 8
+    data = np.random.default_rng(0).normal(size=(n, d)).astype(np.float32)
+    embeddings = IndexedOnly(data)
+    z = np.zeros(n, dtype=np.float32)
+    z[-2:] = 1.0
+    out = select_negatives(
+        z, np.arange(n), 10, strategy="close", active_idx=[n - 2, n - 1],
+        embeddings=embeddings, rng=np.random.default_rng(0))
+
+    assert len(out) == 10
+    assert embeddings.requests[0] == 2
+    assert embeddings.requests[1] == 4_000
+    assert max(embeddings.requests) < n

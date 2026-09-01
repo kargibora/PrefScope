@@ -31,6 +31,13 @@ def test_evaluate_drops_ties():
     assert out["n"] == 220                        # ties excluded
 
 
+def test_evaluate_drops_missing_preferences_instead_of_calling_them_losses():
+    codes, meta = _signal_dataset(n=240)
+    meta.loc[:19, "pref"] = np.nan
+    out = evaluate_preference(codes, meta, seed=0)
+    assert out["n"] == 220
+
+
 def test_evaluate_single_class_raises():
     codes = np.random.default_rng(0).normal(size=(30, 4)).astype(np.float32)
     meta = pd.DataFrame({"pref": [1.0] * 30})    # only one class

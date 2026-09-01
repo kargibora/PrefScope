@@ -156,6 +156,15 @@ def test_feature_confound_correlation_constant_surrogate_is_nan():
     assert auto_undesirable(z, np.zeros(50)) == []
 
 
+def test_feature_confound_correlation_can_condition_on_feature_firing():
+    # Silent rows have extreme surrogate values. The bias-screen mode must exclude them
+    # so its length correlation uses the same rows as the reward/residual correlations.
+    z = np.array([[1.0], [-1.0], [0.0], [0.0]])
+    length = np.array([1.0, -1.0, 100.0, -100.0])
+    conditioned = feature_confound_correlation(z, length, nonzero_only=True)
+    assert np.isclose(conditioned.loc[0, "corr"], 1.0)
+
+
 def test_region_behavior_contrast_bonferroni_counts_all_clusters():
     # 3 regions, one a singleton (degenerate -> dropped). Bonferroni must divide by
     # n_clusters * n_features (3), not by the count of surviving rows (2).

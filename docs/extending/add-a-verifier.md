@@ -17,7 +17,8 @@ implements one method:
 class VerifyStrategy(ABC):
     def __init__(self, *, n_per_bucket=10, verify_frac=0.2, seed=0,
                  fidelity_threshold=0.3, concurrency=1,
-                 negatives="random", embeddings=None): ...
+                 negatives="random", embeddings=None, features=None,
+                 on_result=None): ...
 
     @abstractmethod
     def verify(self, codes: VerifyCodes, names: pd.DataFrame, client) -> pd.DataFrame:
@@ -60,9 +61,16 @@ the keys against your class's `__init__` signature, so a typo raises a clear err
 listing the valid ones.
 
 If you **reuse the base `VerifyStrategy.__init__`** (like the minimal example above),
-you inherit its seven common knobs, all settable from config: `n_per_bucket`,
-`verify_frac`, `seed`, `fidelity_threshold`, `concurrency`, `negatives`,
-`embeddings`. The base bundles them into `self.opts` for you to read.
+you inherit its common knobs, including `n_per_bucket`, `verify_frac`, `seed`,
+`fidelity_threshold`, `concurrency`, `negatives`, `embeddings`, `min_success_rate`,
+`min_bucket`, `sampling`, and `n_examples`. The base bundles them into `self.opts`
+for you to read.
+
+During resumable CLI runs, `features` contains only unfinished feature ids and
+`on_result(row)` durably saves a completed row. Custom per-feature verifiers should filter
+to `self.opts["features"]` when it is not `None` and invoke the callback after finalizing
+each row. The built-in verifiers do this while retaining the full tested-feature count for
+multiple-testing correction.
 
 **To add your own tunable, just declare it in your subclass's `__init__`** — you do
 *not* edit any framework whitelist. Store it on `self` and read it in `verify`:
@@ -103,16 +111,22 @@ from prefscope.interpret.strategy import VerifyStrategy
 class VarianceVerifier(VerifyStrategy):
     def verify(self, codes, names, client):
         z = codes.z_diff if codes.z_diff is not None else codes.z_prompt
+        wanted = self.opts["features"]
+        if wanted is not None:
+            names = names[names["feature_id"].astype(int).isin(wanted)]
         rows = []
         for _, r in names.iterrows():
             f = int(r["feature_id"])
             score = float(np.std(z[:, f]))            # your fidelity signal
-            rows.append({
+            row = {
                 "feature_id": f,
                 "concept": r["concept"],
                 "correlation": score,                 # required column
                 "fidelity_pass": score >= self.opts["fidelity_threshold"],
-            })
+            }
+            rows.append(row)
+            if self.opts["on_result"] is not None:
+                self.opts["on_result"](row)
         return pd.DataFrame(rows)
 ```
 

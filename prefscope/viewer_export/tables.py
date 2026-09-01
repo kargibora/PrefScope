@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from prefscope.analysis.presence import annotation_flag
 from .sanitize import _concept_or_none, _read_csv, _round
 
 
@@ -33,8 +34,10 @@ def export_delta(delta_csv, features: pd.DataFrame, bias_csv=None) -> dict | Non
         return {"id": int(fid), "concept": g("concept"), "behavior": g("behavior"),
                 "cluster_id": (int(r["cluster_id"]) if pd.notna(r.get("cluster_id")) else None),
                 "win_assoc": g("win_assoc"),
-                "fidelity_pass": (bool(r["fidelity_pass"]) if pd.notna(r.get("fidelity_pass")) else None),
-                "confound_entangled": (bool(r["confound_entangled"]) if pd.notna(r.get("confound_entangled")) else None)}
+                "fidelity_pass": (annotation_flag(r["fidelity_pass"])
+                                  if pd.notna(r.get("fidelity_pass")) else None),
+                "confound_entangled": (annotation_flag(r["confound_entangled"])
+                                        if pd.notna(r.get("confound_entangled")) else None)}
 
     pc_name = (dict(zip(d["prompt_concept"], d["prompt_concept_name"]))
                if "prompt_concept_name" in d.columns else {})
@@ -43,7 +46,7 @@ def export_delta(delta_csv, features: pd.DataFrame, bias_csv=None) -> dict | Non
     cells = [{"pc": int(r.prompt_concept), "cf": int(r.completion_feature),
               "delta": round(float(r.delta), 4),
               "p": (round(float(r.p_bonferroni), 4) if pd.notna(r.p_bonferroni) else None),
-              "stable": bool(r.stable)} for r in d.itertuples()]
+              "stable": annotation_flag(r.stable)} for r in d.itertuples()]
     n_sig = sum(1 for c in cells if c["stable"] and c["p"] is not None and c["p"] < 0.05)
     return {"prompt_concepts": [{"id": int(k), "name": _concept_or_none(pc_name, k)} for k in pcs],
             "completion_features": [_col(f) for f in feat_ids],
@@ -88,7 +91,8 @@ def export_conditional(cond_csv, features: pd.DataFrame, delta_csv=None) -> dict
             "delta": round(float(r.delta_win_rate), 4),
             "p": (round(float(rd["cond_p_bonferroni"]), 4)
                   if "cond_p_bonferroni" in rd and pd.notna(rd["cond_p_bonferroni"]) else None),
-            "sig": bool(g(rd, "cond_significant")) if "cond_significant" in rd else False,
+            "sig": (annotation_flag(g(rd, "cond_significant"))
+                    if "cond_significant" in rd else False),
             "n": (int(rd["n_battles"]) if "n_battles" in rd and pd.notna(rd["n_battles"]) else None),
             # effective support: battles of this type where the feature FIRES (the honest
             # per-cell n — n_battles alone overstates a rarely-firing feature's support).
@@ -129,7 +133,7 @@ def export_elicitation(elic_csv, *, max_edges: int = 24000,
     # NB: helper columns must NOT start with "_" — itertuples() renames such columns to
     # positional names, which silently broke reading `sig` back per row.
     d["absl2"] = d["log2_lift"].abs()
-    d["sigf"] = (d["significant"].astype(bool) if "significant" in d.columns
+    d["sigf"] = (d["significant"].map(annotation_flag) if "significant" in d.columns
                  else pd.Series(False, index=d.index))
     d = d.drop_duplicates(["prompt_feature", "completion_feature"])
     # TRUE totals over the full tested set (the CSV holds every reported tested cell) —
@@ -194,10 +198,18 @@ def export_prompt_features(interpret_dir) -> dict | None:
     names = _read_csv(idir / "prompt_feature_names.csv")
     fid = _read_csv(idir / "prompt_feature_fidelity.csv")
     clusters = _read_csv(idir / "prompt_feature_clusters.csv")
-    base = fid if fid is not None else names
+    # Naming normally covers every requested prompt axis, while verification may cover
+    # only a subset (for example after a resumed or intentionally bounded run).  Using
+    # fidelity as the base silently dropped every unverified-but-named prompt feature
+    # from the viewer.  Keep the full name inventory and left-join optional evidence.
+    base = names if names is not None else fid
     if base is None:
         return None
     df = base.copy()
+    if fid is not None and base is not fid:
+        extra = [c for c in fid.columns if c == "feature_id" or c not in df.columns]
+        if len(extra) > 1:
+            df = df.merge(fid[extra], on="feature_id", how="left")
     if names is not None and "concept" not in df.columns:
         df = df.merge(names[["feature_id", "concept"]], on="feature_id", how="left")
     if clusters is not None and "cluster_id" in clusters.columns:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prefscope"
-version = "0.1.0"
+version = "0.2.0"
 description = "PrefScope: an interpretability framework for diagnosing post-training data and model behavior with sparse autoencoders."
 license = { text = "MIT" }
 authors = [{ name = "Bora Kargı" }]
@@ -38,10 +38,17 @@ dependencies = [
     "pyyaml>=6",
     "tqdm>=4.66",
     "openai>=1.40",
+    # Direct dependency: Lens.from_pretrained uses snapshot_download.
+    "huggingface-hub>=0.27",
 ]
 
 [project.scripts]
-prefscope = "prefscope.__main__:main"
+prefscope = "prefscope.cli:console_main"
+# Clear preferred name for the static JSON-bundle exporter.  Keep
+# ``prefscope-viewer`` below for compatibility with existing workflows.
+prefscope-export-viewer = "prefscope.viewer_export.cli:main"
+prefscope-viewer = "prefscope.viewer_export.cli:main"
+prefscope-view = "prefscope.viewer.launch:main"
 
 [project.urls]
 Homepage = "https://github.com/kargibora/PrefScope"
@@ -52,18 +59,17 @@ Issues = "https://github.com/kargibora/PrefScope/issues"
 [project.optional-dependencies]
 # Optional visualization dependencies.
 plots = ["matplotlib>=3.8"]
-# PyTorch accelerator builds — pick ONE at sync time (CUDA vs ROCm can't be
-# auto-detected; they are the same platform). On macOS, `--extra cpu` resolves the
-# regular PyPI wheel, which includes MPS support.
-#   uv sync --extra cpu     # CPU-only / CI
-#   uv sync --extra cu121   # NVIDIA CUDA 12.1
-#   uv sync --extra rocm    # AMD ROCm 6.3
+# Generic PyTorch extras. For a particular CUDA/ROCm build, install PyTorch from
+# its official platform index first; package metadata cannot carry uv-only indexes.
 cpu = ["torch>=2.3"]
-cu121 = ["torch>=2.3"]
-rocm = ["torch>=2.3", "pytorch-triton-rocm; sys_platform == 'linux'"]
+torch = ["torch>=2.3"]
+# Optional pretrained internal-activation SAE backend. Keep this out of the base
+# install because SAELens brings TransformerLens and a full model-analysis stack.
+saelens = ["sae-lens>=6.50,<7"]
 viewer = [
     "streamlit>=1.36",
     "plotly>=5.22",
+    "umap-learn>=0.5.7",
 ]
 arena = [
     "datasets>=2.14",
@@ -88,52 +94,20 @@ packages = ["prefscope"]
 # Keep source distributions restricted to supported package and documentation files.
 only-include = [
     "prefscope", "docs", "examples", "LICENSE", "README.md", "CONTRIBUTING.md",
-    "CHANGELOG.md", "pyproject.toml",
+    "CHANGELOG.md", "CODE_OF_CONDUCT.md", "SECURITY.md", "CITATION.cff",
+    "THIRD_PARTY_NOTICES.md", "pyproject.toml",
 ]
-
-[tool.uv]
-# The cpu / cu121 / rocm torch builds are mutually exclusive.
-conflicts = [[{ extra = "cpu" }, { extra = "cu121" }, { extra = "rocm" }]]
-
-# Route torch to the right wheel index per chosen extra. With no accelerator extra,
-# torch is intentionally absent. The Darwin marker keeps the Linux-only CPU index
-# off macOS so the `cpu` extra falls back to the PyPI wheel with MPS support.
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", extra = "cpu", marker = "platform_system != 'Darwin'" },
-    { index = "pytorch-cu121", extra = "cu121", marker = "sys_platform == 'linux'" },
-    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
-]
-# torch's ROCm wheel depends on pytorch-triton-rocm, which is only on the ROCm
-# index (not PyPI); route it there too or the rocm extra is unsatisfiable.
-pytorch-triton-rocm = [
-    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
-]
-
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-rocm"
-url = "https://download.pytorch.org/whl/rocm6.3"
-explicit = true
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
-    "ruff>=0.14.14",
+    "ruff>=0.14.14,<0.15",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
-    "slow: requires heavy models or live API (deselect with -m 'not slow')",
+    "slow: opt-in integration, heavy-model, live-API, or dedicated contract test",
+    "integration: crosses package, optional-dependency, or repository-contract boundaries",
 ]

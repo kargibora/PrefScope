@@ -1,0 +1,47 @@
+version: 1
+
+lenses:
+  repo: owner/prefscope-lenses
+  revision: v1
+  completion_subfolder: completion-m2048
+  prompt_subfolder: prompt-m256
+
+data:
+  source:
+    type: local
+    path: my_outputs.parquet
+  columns:
+    prompt: prompt
+    response_a: response
+    # Add these when the dataset contains a comparison:
+    # response_b: other_response
+    # label: winner
+    # model_a: model
+    # model_b: other_model
+    # item_id: id
+    # language: language
+  # For winner strings, declare their meaning explicitly:
+  # label:
+  #   mode: winner
+  #   a_values: [model_a]
+  #   b_values: [model_b]
+  #   tie_values: [tie]
+  mode: single
+
+out_dir: analysis/my-run
+device: cuda
+
+concepts:
+  presence_policy: mixed
+  fidelity_only: true
+  include_text: false
+
+analysis:
+  relationships: auto
+  comparison: auto
+  preference: auto
+
+viewer:
+  enabled: true
+  # Set this to PrefScope-Viewer's data directory to update it directly:
+  # output_dir: ../PrefScope-Viewer/public/data

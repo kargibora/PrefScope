@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import re
 
 from prefscope.interpret.prompts import parse_presence
 from prefscope.interpret.verify import verify_single_text_features
@@ -21,6 +22,40 @@ class _FakeClient:
     """Says 'Yes' iff the text shown in the prompt contains the marker."""
     def raw(self, messages, **kwargs):
         return "Yes" if "ZQX" in " ".join(m["content"] for m in messages) else "No"
+
+
+class _RecordingClient(_FakeClient):
+    def __init__(self):
+        self.instruction_ids = []
+
+    def raw(self, messages, **kwargs):
+        text = " ".join(m["content"] for m in messages)
+        match = re.search(r"instruction-(\d+)", text)
+        assert match is not None
+        self.instruction_ids.append(match.group(1))
+        return "Yes" if "ZQX" in text else "No"
+
+
+def test_verify_single_text_samples_unique_instructions():
+    # A/B responses for the same prompt are correlated and must count as one held-out unit.
+    ids = [str(i) for i in range(6) for _ in range(2)]
+    texts = []
+    z = np.zeros((12, 1), dtype=np.float32)
+    for i in range(6):
+        for side in ("a", "b"):
+            texts.append(
+                f"{'ZQX ' if i < 3 else ''}instruction-{i} side-{side}")
+        if i < 3:
+            z[2 * i:2 * i + 2, 0] = 2.0
+    names = pd.DataFrame({"feature_id": [0], "concept": ["uses a marker"]})
+    client = _RecordingClient()
+    row = verify_single_text_features(
+        texts, z, names, client, instruction_ids=ids,
+        n_active=3, n_zero=3, verify_frac=1.0, seed=0,
+        min_bucket=3).iloc[0]
+    assert row["n_attempted"] == 6
+    assert len(client.instruction_ids) == len(set(client.instruction_ids)) == 6
+    assert bool(row["fidelity_pass"]) is True
 
 
 def test_verify_single_text_passes_faithful_feature():

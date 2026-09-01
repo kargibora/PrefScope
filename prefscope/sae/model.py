@@ -14,8 +14,20 @@ from prefscope.core import registry
 #  WIMHF-style Batch TopK SAE
 # ─────────────────────────────────────────────────────────────────────────────
 
+@registry.register("sae", "signed-batchtopk")
 @registry.register("sae", "batchtopk")
 class BatchTopKSAE(nn.Module):
+    """Signed BatchTopK SAE used by PrefScope's legacy and difference lenses.
+
+    ``batchtopk`` deliberately keeps its historical signed semantics so existing
+    checkpoints remain bit-for-bit compatible.  New presence-style individual
+    and prompt lenses should use :class:`NonnegativeBatchTopKSAE` instead.
+    """
+
+    activation_polarity = "signed"
+    code_semantics = "axis"
+    selection_rule = "batchtopk-absolute"
+
     def __init__(
         self,
         input_dim: int,
@@ -73,6 +85,20 @@ class BatchTopKSAE(nn.Module):
         """Pre-selection activations: encoder(x - b_in) + b_neuron."""
         return self.encoder(x - self.input_bias) + self.neuron_bias
 
+    def _selection_pre(self, pre: torch.Tensor) -> torch.Tensor:
+        """Pre-activations eligible for selection.
+
+        This identity hook is intentional: keeping the signed class unchanged is
+        the checkpoint-compatibility boundary, while the non-negative subclass
+        applies ReLU here.  Forward, inference, auxiliary selection and threshold
+        calibration all consume this same tensor so their semantics cannot drift.
+        """
+        return pre
+
+    def _threshold_scores(self, pre: torch.Tensor) -> torch.Tensor:
+        """Scalar scores compared with the inference threshold."""
+        return pre.abs()
+
     def _batch_topk(self, acts: torch.Tensor) -> torch.Tensor:
         """Signed Batch TopK: keep top (k * batch_size) values by |·|, sign preserved."""
         batch = acts.shape[0]
@@ -97,7 +123,8 @@ class BatchTopKSAE(nn.Module):
         per-feature gate, SimpleTopK's per-example top-k) get their own selection
         here without overriding ``encode``. This is the single inference entry
         point ``SAEProjector`` calls, so it must mirror ``forward``'s eval branch."""
-        return self._threshold_select(self.encode_pre(x))
+        pre = self._selection_pre(self.encode_pre(x))
+        return self._threshold_select(pre)
 
     @torch.no_grad()
     def _update_threshold_(self, activ: torch.Tensor, lr: float = 1e-2) -> None:
@@ -116,31 +143,38 @@ class BatchTopKSAE(nn.Module):
             return None, None
         aux_k = min(self.aux_k, n_dead)
 
-        # zero out live neurons in a copy
-        masked = pre_acts.masked_fill(~dead_mask.unsqueeze(0), 0.0)
-        abs_ = masked.abs()
-        _, idx = torch.topk(abs_, aux_k, dim=-1)            # (batch, aux_k)
-        values = masked.gather(-1, idx)                      # (batch, aux_k)
+        # Make live features ineligible rather than setting them to zero. The
+        # latter is unsafe for a ReLU SAE: genuinely dead preactivations can also
+        # be zero, so topk ties could accidentally choose a live feature.
+        scores = pre_acts.abs().masked_fill(
+            ~dead_mask.unsqueeze(0), float("-inf"))
+        _, idx = torch.topk(scores, aux_k, dim=-1)           # (batch, aux_k)
+        values = pre_acts.gather(-1, idx)                    # (batch, aux_k)
         return idx, values
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, dict]:
-        pre = self.encode_pre(x)
+        raw_pre = self.encode_pre(x)
+        pre = self._selection_pre(raw_pre)
         if self.training:
             activ = self._batch_topk(pre)
             self._update_threshold_(activ)
-            fired = (activ != 0).any(dim=0)
-            # steps_since_activation: ++ globally, then 0 for fired neurons
-            self.steps_since_activation += 1
-            self.steps_since_activation[fired] = 0
+            self._update_firing_stats_(activ)
             aux_idx, aux_vals = self._aux_topk(pre)
             info = {"activations": activ, "aux_indices": aux_idx,
-                    "aux_values": aux_vals}
+                    "aux_values": aux_vals, "pre": pre, "raw_pre": raw_pre}
         else:
             activ = self._threshold_select(pre)
             info = {"activations": activ, "aux_indices": None,
-                    "aux_values": None}
+                    "aux_values": None, "pre": pre, "raw_pre": raw_pre}
         recon = self.decoder(activ) + self.input_bias
         return recon, info
+
+    @torch.no_grad()
+    def _update_firing_stats_(self, activ: torch.Tensor) -> None:
+        """Advance shared firing counters for every trainable SAE architecture."""
+        fired = (activ != 0).any(dim=0)
+        self.steps_since_activation += 1
+        self.steps_since_activation[fired] = 0
 
     # ── decoder housekeeping ──
 
@@ -219,6 +253,39 @@ class BatchTopKSAE(nn.Module):
         }
 
 
+@registry.register("sae", "batchtopk-relu")
+class NonnegativeBatchTopKSAE(BatchTopKSAE):
+    """Standard non-negative BatchTopK for presence-style behavior features.
+
+    ReLU is applied before batch-level allocation, auxiliary dead-feature
+    selection and inference thresholding.  Codes therefore have a direct
+    presence interpretation: zero means absent/silent and larger positive values
+    mean more of the learned feature.
+    """
+
+    activation_polarity = "nonnegative"
+    code_semantics = "presence"
+    selection_rule = "batchtopk-relu"
+
+    def _selection_pre(self, pre: torch.Tensor) -> torch.Tensor:
+        return F.relu(pre)
+
+    def _batch_topk(self, acts: torch.Tensor) -> torch.Tensor:
+        batch = acts.shape[0]
+        k_total = min(self.k * batch, acts.numel())
+        flat = acts.flatten()
+        _, idx = torch.topk(flat, k_total, dim=-1)
+        out = torch.zeros_like(flat)
+        out.scatter_(0, idx, flat.gather(0, idx))
+        return out.view(acts.shape)
+
+    def _threshold_select(self, acts: torch.Tensor) -> torch.Tensor:
+        return torch.where(acts > self.threshold, acts, torch.zeros_like(acts))
+
+    def _threshold_scores(self, pre: torch.Tensor) -> torch.Tensor:
+        return pre
+
+
 @registry.register("sae", "simple-topk")
 class SimpleTopKSAE(BatchTopKSAE):
     """Plain signed TopK SAE ablation.
@@ -230,6 +297,8 @@ class SimpleTopKSAE(BatchTopKSAE):
     reliability signals depend on BatchTopK, or do they also appear with a
     simpler sparse dictionary?
     """
+
+    selection_rule = "topk-absolute"
 
     def __init__(
         self,
@@ -334,6 +403,10 @@ class JumpReLUSAE(BatchTopKSAE):
     Matryoshka and the dead-neuron auxiliary loss.
     """
 
+    activation_polarity = "nonnegative"
+    code_semantics = "presence"
+    selection_rule = "jumprelu"
+
     def __init__(self, input_dim, m_total_neurons, k_active_neurons=0, *,
                  sparsity_coef: float = 1e-3, bandwidth: float = 1e-3,
                  threshold_init: float = 1e-3, **_) -> None:
@@ -347,6 +420,10 @@ class JumpReLUSAE(BatchTopKSAE):
         # per-feature threshold in log space (positivity-safe), paper init θ=1e-3
         self.log_threshold = nn.Parameter(
             torch.full((m_total_neurons,), math.log(threshold_init)))
+        self.sparsity_scale = 1.0
+
+    def _selection_pre(self, pre: torch.Tensor) -> torch.Tensor:
+        return F.relu(pre)
 
     def _thresholds(self) -> torch.Tensor:
         return torch.exp(self.log_threshold)
@@ -357,14 +434,17 @@ class JumpReLUSAE(BatchTopKSAE):
         return torch.where(pre > thr, pre, torch.zeros_like(pre))
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, dict]:
-        pre = self.encode_pre(x)
+        raw_pre = self.encode_pre(x)
+        pre = self._selection_pre(raw_pre)
         if self.training:
             activ = _JumpReLU.apply(pre, self._thresholds(), self.bandwidth)
+            self._update_firing_stats_(activ)
         else:
             activ = self._threshold_select(pre)
         recon = self.decoder(activ) + self.input_bias
         return recon, {"activations": activ, "pre": pre,
-                       "aux_indices": None, "aux_values": None}
+                       "raw_pre": raw_pre, "aux_indices": None,
+                       "aux_values": None}
 
     def compute_loss(self, x, recon, info, aux_coef: float = 0.0):
         # main = reconstruction (codebase normalized-MSE, for a comparable val metric);
@@ -372,9 +452,12 @@ class JumpReLUSAE(BatchTopKSAE):
         main = self._normalized_mse(recon, x)
         l0 = _Step.apply(info["pre"], self._thresholds(),
                          self.bandwidth).sum(dim=-1).mean()
-        total = main + self.sparsity_coef * l0
+        total = main + self.sparsity_coef * self.sparsity_scale * l0
         return total, {"main": float(main.detach()), "aux": float(l0.detach()),
                        "total": float(total.detach())}
+
+    def set_sparsity_scale(self, scale: float) -> None:
+        self.sparsity_scale = float(scale)
 
 
 def encode_in_batches(model: BatchTopKSAE, X: np.ndarray, batch: int,
@@ -384,7 +467,41 @@ def encode_in_batches(model: BatchTopKSAE, X: np.ndarray, batch: int,
     with torch.no_grad():
         for i in range(0, X.shape[0], batch):
             xb = torch.from_numpy(X[i:i + batch]).to(device, dtype=torch.float32)
-            pre = model.encode_pre(xb)
-            z = model._threshold_select(pre)
+            z = model.encode(xb)
             out[i:i + batch] = z.float().cpu().numpy()
     return out
+
+
+_SAE_ALIASES = {"signed-batchtopk": "batchtopk"}
+
+
+def canonical_sae_type(sae_type: str) -> str:
+    """Return the checkpoint-stable registry name for a public SAE alias."""
+    return _SAE_ALIASES.get(sae_type, sae_type)
+
+
+def resolve_sae_type(sae_type: str | None, input_rep: str | None) -> str:
+    """Resolve the context-sensitive public ``auto`` architecture.
+
+    Direct embedding differences are signed axes.  Individual responses and
+    prompts are non-negative feature presences.  ``input_rep=None`` retains the
+    historical signed default for callers of the low-level trainer.
+    """
+    if sae_type in (None, "auto"):
+        return "batchtopk-relu" if input_rep in ("individual", "prompt") else "batchtopk"
+    return canonical_sae_type(str(sae_type))
+
+
+def sae_semantics(sae_type: str | None) -> dict[str, str]:
+    """Artifact metadata for an SAE registry name, including custom subclasses."""
+    resolved = canonical_sae_type(sae_type or "batchtopk")
+    try:
+        cls = registry.get("sae", resolved)
+    except KeyError:
+        return {"activation_polarity": "unknown", "code_semantics": "custom",
+                "selection_rule": "custom"}
+    return {
+        "activation_polarity": getattr(cls, "activation_polarity", "unknown"),
+        "code_semantics": getattr(cls, "code_semantics", "custom"),
+        "selection_rule": getattr(cls, "selection_rule", resolved),
+    }
