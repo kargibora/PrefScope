@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/kargibora/PrefScope/main/docs/assets/prefscope-logo.jpg" alt="PrefScope logo" width="360">
-</p>
-
-# PrefScope
+<h1 align="center">
+  <img src="https://raw.githubusercontent.com/kargibora/PrefScope/main/docs/assets/prefscope-logo.jpg" alt="PrefScope" width="280">
+</h1>
 
 A win rate can show that one response set wins more often. It does not show which
 recurring prompt or response patterns co-occur with those wins. **PrefScope turns
@@ -336,14 +334,7 @@ The project is an alpha API. Production and experimental surfaces are listed in
 [CHANGELOG.md](https://github.com/kargibora/PrefScope/blob/main/CHANGELOG.md), and contributions are welcome through
 [CONTRIBUTING.md](https://github.com/kargibora/PrefScope/blob/main/CONTRIBUTING.md).
 
-## Method lineage and scientific limits
-
-PrefScope adapts contrast-lens and feature-interpretation ideas from
-[*What's In My Human Feedback?*](https://arxiv.org/abs/2510.26202), uses SAE architectures
-related to [BatchTopK](https://arxiv.org/abs/2412.06410), and is motivated by
-post-training-data auditing work such as
-[*Anatomy of Post-Training*](https://arxiv.org/abs/2606.12360). See
-[Third-party notices](https://github.com/kargibora/PrefScope/blob/main/THIRD_PARTY_NOTICES.md) for vendored or adapted material.
+## Scientific limits
 
 Named sparse features and preference associations are descriptive. For research claims,
 use prompt-grouped splits, human semantic audits, multiple SAE and interpretation seeds,
