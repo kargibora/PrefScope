@@ -31,6 +31,7 @@ def test_load_aligns_battles_to_zdiff_order(tmp_path):
     assert list(battles["instruction_id"]) == ["2", "0", "1"]
     assert list(battles["completion_a"]) == ["a2", "a0", "a1"]
     assert z_diff.shape == (3, 4)
+    assert isinstance(z_diff, np.memmap)
     assert manifest["input_rep"] == "difference"
 
 

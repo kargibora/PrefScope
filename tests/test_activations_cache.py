@@ -1,8 +1,7 @@
 import numpy as np
-import pandas as pd
 import pytest
 
-from prefscope.activations.cache import ActivationCache
+from prefscope.activations.cache import ActivationCache, train_val_row_indices
 
 
 def test_append_finalize_reopen_roundtrip(tmp_path):
@@ -54,9 +53,6 @@ def test_write_methods_rejected_on_opened_cache(tmp_path):
         r.append(np.zeros((1, 2), dtype=np.float32), [{"battle_id": "x", "span": "a", "token_idx": 0}])
 
 
-from prefscope.activations.cache import train_val_row_indices
-
-
 def test_train_val_split_disjoint_and_deterministic():
     tr, va = train_val_row_indices(1000, val_frac=0.1, max_train_tokens=None, seed=0)
     assert len(va) == 100
@@ -73,3 +69,46 @@ def test_reservoir_cap_limits_train_only():
     assert len(va) == 100          # val is never capped
     assert len(tr) == 300          # train capped to the reservoir budget
     assert set(tr).isdisjoint(set(va))
+
+
+def test_new_writer_refuses_to_truncate_existing_cache(tmp_path):
+    c = ActivationCache(tmp_path, hidden_dim=2)
+    c.append(
+        np.ones((1, 2), dtype=np.float32),
+        [{"battle_id": "x", "span": "a", "token_idx": 0}],
+    )
+    c.finalize()
+    acts = tmp_path / "acts.f16"
+    before = acts.read_bytes()
+
+    with pytest.raises(FileExistsError, match="not empty"):
+        ActivationCache(tmp_path, hidden_dim=2)
+
+    assert acts.read_bytes() == before
+    reopened = ActivationCache.open(tmp_path)
+    assert reopened.n_tokens == 1
+    np.testing.assert_allclose(np.asarray(reopened.acts), [[1.0, 1.0]])
+
+
+@pytest.mark.parametrize(
+    ("n_tokens", "val_frac", "max_train_tokens", "message"),
+    [
+        (0, 0.1, None, "at least 2"),
+        (10, 0.0, None, "strictly between"),
+        (10, 1.0, None, "strictly between"),
+        (10, float("nan"), None, "strictly between"),
+        (10, 0.1, 0, "positive integer"),
+        (10, 0.1, -1, "positive integer"),
+        (10, 0.1, 2.5, "positive integer"),
+    ],
+)
+def test_train_val_split_rejects_invalid_inputs(
+    n_tokens, val_frac, max_train_tokens, message
+):
+    with pytest.raises(ValueError, match=message):
+        train_val_row_indices(n_tokens, val_frac, max_train_tokens)
+
+
+def test_train_val_split_rejects_fraction_that_rounds_to_empty_partition():
+    with pytest.raises(ValueError, match="leaves both"):
+        train_val_row_indices(2, val_frac=0.1, max_train_tokens=None)

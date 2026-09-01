@@ -1,7 +1,8 @@
 # PrefScope diagnosis — the math
 
 What every number in the diagnosis pipeline means, and the formula behind it.
-Borrows from WIMHF ("What's In My Human Feedback") and *Anatomy of Post-Training*
+Borrows from [WIMHF ("What's In My Human Feedback")](https://arxiv.org/abs/2510.26202)
+and [*Anatomy of Post-Training*](https://arxiv.org/abs/2606.12360)
 (the inside-vs-outside contrast and the predicted-vs-actual validation).
 
 Notation: a **battle** is a prompt with two completions $A$, $B$ from models
@@ -60,19 +61,20 @@ $$
 $$
 
 Arena has a strong **length bias** — longer answers win — so this raw split partly
-measures verbosity. The helps-win signal is therefore length-controlled:
+measures verbosity. The preference-association signal is therefore length-controlled:
 `outcome_assoc_lc` is the per-feature logistic **average marginal effect** (the
 `win_relevance_logistic` $\Delta$win-rate, §5) fit on $X$'s battles with the
 word-count gap $\ell^\Delta = \text{wc(self)} - \text{wc(other)}$ held fixed. When a
 global win-relevance frame is passed in, its length-controlled `delta_win_rate` is
-merged as `helps_win` (the global feature-reward weight); the within-model
+merged as `helps_win` (the legacy column name for global preference association); the within-model
 `outcome_assoc_lc` is the secondary read. A `length_confound` column (correlation of
 $\operatorname{sign}(z_f)$ with $\ell^\Delta$) surfaces features that are mostly
 verbosity proxies.
 
-Reading: `net_direction < 0` **and** `helps_win > 0` (or `outcome_assoc_lc > 0`) ⇒
-$X$ *under*-expresses a concept that *helps* it win even after length control — a gap
-worth closing.
+Reading: `net_direction < 0` and positive `helps_win` (or `outcome_assoc_lc`) means
+$X$ under-expresses a concept that is preference-associated after length control. This
+is descriptive evidence, not a causal claim that adding the concept would improve the
+model; interventions or stronger causal controls are needed for that conclusion.
 
 ---
 
@@ -126,7 +128,7 @@ by $\Delta^{\text{pool}}$ instead of raw `net_direction`.
 
 ---
 
-## 5. Which features do humans reward? (`win_assoc`)
+## 5. Which features are preference-associated? (`win_assoc`)
 
 Model-independent, computed on the natural $z_{\text{diff}}$ and $y=P(A\ \text{pref})$
 (this is the WIMHF reward question). With $\tilde y = 2y-1 \in\{-1,0,+1\}$:
@@ -144,7 +146,8 @@ $r_f$ with Bonferroni $p$ gives the `significant` flag.
 
 ## 6. Predictive validation (`validate-diagnosis`)
 
-The end-to-end check: a model that under-expresses human-rewarded features should
+The end-to-end predictive check asks whether a model that under-expresses
+preference-associated features tends to
 actually lose more. Define the **predicted advantage**
 
 $$
@@ -195,5 +198,5 @@ diagnose --lens-dir LENS --model X --bank BANK ...      # §2 + §4 (delta_vs_po
 validate-diagnosis --bank BANK --win-relevance WR --loo --out VAL   # §6
 ```
 
-All of §3–§6 are pure NumPy/SciPy over cached code matrices — no GPU, no
-re-embedding.
+These steps reuse cached embeddings or codes. They do not re-embed text or require a
+GPU. `build-bank` still loads the SAE projector and runs it on the cached embeddings.

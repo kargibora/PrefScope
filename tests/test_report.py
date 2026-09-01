@@ -237,6 +237,30 @@ def test_prompt_concept_winrates_min_battles_and_names(tmp_path):
     np.testing.assert_allclose(out.iloc[0]["win_rate"], 0.5)
 
 
+def test_prompt_reports_keep_overlapping_concepts_instead_of_argmax(tmp_path):
+    plens = tmp_path / "plens"
+    plens.mkdir()
+    ids = [f"b{i}" for i in range(8)]
+    z = np.zeros((8, 2), dtype=np.float32)
+    z[:, 0] = 2.0
+    z[:4, 1] = 3.0  # first four prompts express BOTH concepts
+    np.save(plens / Z_PROMPT, z)
+    pd.DataFrame({"battle_id": ids}).to_parquet(plens / BATTLES)
+    win = np.array([1, 1, 1, 1, 0, 0, 0, 0], dtype=float)
+
+    rates = prompt_concept_winrates(plens, ids, win, min_battles=2)
+    rates = rates.set_index("prompt_concept")
+    assert set(rates.index) == {0, 1}
+    assert rates.loc[0, "n"] == 8 and rates.loc[1, "n"] == 4
+    np.testing.assert_allclose(rates.loc[1, "win_rate"], 1.0)
+
+    response = np.zeros((8, 1), dtype=np.float32)
+    response[[0, 1, 4, 5], 0] = 1.0
+    edges = prompt_to_response_winrates(
+        plens, ids, response, [7], win, min_support=2)
+    assert set(edges["prompt_concept"]) == {0, 1}
+
+
 # --- CLI handler wiring (embedder/projector monkeypatched; no GPU) ---
 import json
 
@@ -261,7 +285,7 @@ def test_cmd_report_writes_markdown_and_features_csv(tmp_path, monkeypatch):
         return df, {"model": model, "n_battles": 2, "win_rate": 1.0, "n_features": 2}
 
     monkeypatch.setattr("prefscope.pipeline.diagnose.run_diagnose", fake_run_diagnose)
-    monkeypatch.setattr(cli, "Embedder", lambda *a, **k: object())
+    monkeypatch.setattr("prefscope.cli.analysis.Embedder", lambda *a, **k: object())
     monkeypatch.setattr("prefscope.encode.sae.SAEProjector", lambda *a, **k: object())
 
     out_md = tmp_path / "report.md"

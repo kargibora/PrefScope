@@ -1,0 +1,8 @@
+version: 1
+backend: saelens
+release: gpt2-small-res-jb
+sae_id: blocks.8.hook_resid_pre
+device: cpu
+text_batch_size: 8
+long_text_policy: truncate
+include_bos: false

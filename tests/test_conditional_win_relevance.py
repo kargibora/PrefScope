@@ -31,3 +31,45 @@ def test_conditional_win_relevance_skips_thin_prompt_types():
     pc = np.array([0] * 480 + [1] * 20)               # type 1 too small
     out = conditional_win_relevance(z, y, np.zeros(500), pc, min_battles=100)
     assert set(out["prompt_concept"]) == {0}          # thin type dropped
+
+
+def test_conditional_win_relevance_accepts_overlapping_prompt_membership():
+    rng = np.random.default_rng(5)
+    n = 1200
+    z = rng.normal(0, 1, (n, 1))
+    membership = np.zeros((n, 2), dtype=bool)
+    membership[:800, 0] = True
+    membership[400:, 1] = True  # 400 rows belong to both prompt concepts
+    y = np.zeros(n)
+    y[membership[:, 0] & ~membership[:, 1]] = (
+        z[membership[:, 0] & ~membership[:, 1], 0] > 0).astype(float)
+    y[membership[:, 1]] = (
+        z[membership[:, 1], 0] < 0).astype(float)
+
+    out = conditional_win_relevance(
+        z, y, np.zeros(n), membership, prompt_region_ids=[10, 20],
+        min_battles=300)
+
+    assert set(out["prompt_concept"]) == {10, 20}
+
+
+def test_conditional_support_uses_exact_fitting_rows():
+    rng = np.random.default_rng(7)
+    z = rng.normal(size=(400, 1))
+    y = np.full(400, 0.5)
+    y[:50] = (z[:50, 0] > 0).astype(float)
+    membership = np.ones((400, 1), dtype=bool)
+
+    out = conditional_win_relevance(
+        z, y, np.zeros(400), membership, min_battles=100)
+    assert out.empty
+
+
+def test_conditional_rejects_varying_membership_within_group():
+    z = np.ones((4, 1))
+    y = np.array([1.0, 0.0, 1.0, 0.0])
+    membership = np.array([[True], [False], [True], [False]])
+    with np.testing.assert_raises_regex(ValueError, "constant within each group"):
+        conditional_win_relevance(
+            z, y, np.zeros(4), membership,
+            group_ids=["same", "same", "a", "b"], min_battles=1)

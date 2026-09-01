@@ -2,18 +2,28 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import pandas as pd
 
-from prefscope.artifacts import FEATURE_CLUSTERS
+from prefscope.artifacts import FEATURE_CLUSTERS, Z_DIFF
+from prefscope.config import VIEWER_EXPORT_DEFAULTS
 
 from .diagnosis import export_diagnosis, export_head_to_head
-from .examples import export_examples, export_examples_by_model, export_report_battles
+from .clusters import export_feature_clusters
+from .comparison import export_paired_comparison
+from .examples import (export_examples, export_examples_by_model,
+                       export_joint_examples, export_prompt_examples,
+                       export_report_battles)
 from .features import (export_features, export_meta, feature_fire_rate,
                        feature_prompt_types)
-from .maps import export_map, export_prompt_map, export_response_map
+from .maps import (export_feature_map, export_map, export_prompt_map,
+                   export_response_map)
+from .overview import (export_coactivation, export_concept_distribution,
+                       export_prompt_coactivation,
+                       export_prompt_concept_distribution)
 from .sanitize import _dumps, _read_csv, _round
 from .tables import (export_bias_screen, export_conditional, export_delta,
                      export_elicitation, export_prompt_features)
@@ -21,9 +31,15 @@ from .tables import (export_bias_screen, export_conditional, export_delta,
 BUNDLE_SCHEMA_VERSION = 2
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--lens-dir", required=True)
+    ap.add_argument(
+        "--analysis-dir",
+        default=None,
+        help="directory containing completion feature names/fidelity/roles/clusters and "
+             "other analysis tables; defaults to --lens-dir",
+    )
     ap.add_argument("--delta", default=None,
                     help="prompt_conditioned_delta.csv (RAW prompt concepts) -> delta.json")
     ap.add_argument("--delta-clustered", default=None, dest="delta_clustered",
@@ -46,7 +62,14 @@ def main() -> int:
                     help="dir with prompt_feature_{names,fidelity,clusters}.csv -> prompt_features.json")
     ap.add_argument("--corpus", default="", help="corpus parquet for example battles")
     ap.add_argument("--out", default="viewer-data")
-    ap.add_argument("--examples-per-feature", type=int, default=12)
+    ap.add_argument("--examples-per-feature", type=int, default=VIEWER_EXPORT_DEFAULTS["examples_per_feature"])
+    ap.add_argument("--examples-per-group", type=int, default=VIEWER_EXPORT_DEFAULTS["examples_per_group"],
+                    help="additional strongest examples per available language/source "
+                         "for each response feature (default: 2)")
+    ap.add_argument("--examples-random", type=int, default=VIEWER_EXPORT_DEFAULTS["examples_random"],
+                    help="random active examples per response feature (default: 4)")
+    ap.add_argument("--examples-boundary", type=int, default=VIEWER_EXPORT_DEFAULTS["examples_boundary"],
+                    help="near-threshold/boundary examples per response feature (default: 4)")
     ap.add_argument("--examples-by-model", action="store_true", dest="examples_by_model",
                     help="emit examples_by_model.json: per (model × feature) the model's OWN "
                          "top answers exhibiting the feature (needs --corpus + individual lens)")
@@ -59,6 +82,13 @@ def main() -> int:
     ap.add_argument("--report-battles-per-type", type=int, default=5,
                     dest="report_battles_per_type",
                     help="sample battles per (model × prompt concept) for the drill-in")
+    ap.add_argument("--joint-examples", action="store_true", dest="joint_examples",
+                    help="emit prompt-sharded examples where a selected prompt feature and "
+                         "response feature are both strongly active (needs --corpus + "
+                         "--prompt-lens + individual z_a; z_b is optional)")
+    ap.add_argument("--joint-examples-per-pair", type=int, default=3,
+                    dest="joint_examples_per_pair",
+                    help="matched examples per prompt-feature × response-feature pair")
     ap.add_argument("--head-to-head", action="store_true", dest="head_to_head",
                     help="emit head_to_head.json: paired prompt-matched feature contrast "
                          "between model pairs, for the report card's 'vs model' mode "
@@ -69,9 +99,28 @@ def main() -> int:
                          "head_to_head.json (the viewer further gates on significance)")
     ap.add_argument("--map", action="store_true",
                     help="also compute the UMAP 2D map (needs umap-learn)")
-    ap.add_argument("--map-sample", type=int, default=2500, dest="map_sample",
+    ap.add_argument("--feature-map", action="store_true", dest="feature_map",
+                    help="emit feature_map.json: one point for every SAE decoder axis; "
+                         "uses UMAP when available and deterministic SVD otherwise")
+    ap.add_argument("--feature-map-neighbors", type=int, default=30,
+                    dest="feature_map_neighbors",
+                    help="UMAP neighbor count for --feature-map (default: 30)")
+    ap.add_argument("--prompt-feature-map", action="store_true", dest="prompt_feature_map",
+                    help="emit prompt_feature_map.json: one point per prompt SAE decoder "
+                         "axis (needs --prompt-lens + --prompt-interpret-dir)")
+    ap.add_argument("--prompt-examples-per-feature", type=int, default=VIEWER_EXPORT_DEFAULTS["prompt_examples_per_feature"],
+                    dest="prompt_examples_per_feature",
+                    help="top activating prompts per prompt feature (default: 8)")
+    ap.add_argument("--prompt-examples-per-group", type=int, default=VIEWER_EXPORT_DEFAULTS["prompt_examples_per_group"],
+                    help="additional strongest prompts per available language/source "
+                         "for each prompt feature (default: 2)")
+    ap.add_argument("--prompt-examples-random", type=int, default=VIEWER_EXPORT_DEFAULTS["prompt_examples_random"],
+                    help="random active prompts per prompt feature (default: 4)")
+    ap.add_argument("--prompt-examples-boundary", type=int, default=VIEWER_EXPORT_DEFAULTS["prompt_examples_boundary"],
+                    help="near-boundary prompts per prompt feature (default: 4)")
+    ap.add_argument("--map-sample", type=int, default=VIEWER_EXPORT_DEFAULTS["map_sample"], dest="map_sample",
                     help="battles to subsample for the map scatter")
-    ap.add_argument("--map-sample-mode", default="hybrid", dest="map_sample_mode",
+    ap.add_argument("--map-sample-mode", default=VIEWER_EXPORT_DEFAULTS["map_sample_mode"], dest="map_sample_mode",
                     choices=["random", "top-activating", "hybrid"],
                     help="which battles to show: random (faithful), top-activating "
                          "(clean clusters), or hybrid (default: half each)")
@@ -86,9 +135,18 @@ def main() -> int:
                     help="emit response_map.json — feature UMAP at the SINGLE-RESPONSE level "
                          "(individual lens z_a, plus z_b for paired data); a click shows "
                          "one response, not an A/B pair")
-    a = ap.parse_args()
+    ap.add_argument("--coactivation-top-k", type=int, default=VIEWER_EXPORT_DEFAULTS["coactivation_top_k"],
+                    dest="coactivation_top_k",
+                    help="strongest co-firing partners retained per concept")
+    ap.add_argument("--coactivation-max-pairs", type=int, default=VIEWER_EXPORT_DEFAULTS["coactivation_max_pairs"],
+                    dest="coactivation_max_pairs",
+                    help="cap on retained co-activation pairs")
+    ap.add_argument("--comparison-dir", default=None, dest="comparison_dir",
+                    help="paired compare-responses output -> paired_comparison.json")
+    a = ap.parse_args(argv)
 
     lens = Path(a.lens_dir)
+    analysis = Path(a.analysis_dir) if a.analysis_dir else lens
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -107,11 +165,20 @@ def main() -> int:
         errors.append({"stage": stage, "error": str(err)})
         print(f"  (!{stage}: {err})", file=sys.stderr)
 
-    features = export_features(lens)
-    validation = _read_csv(lens / "diagnosis_validation.csv")
+    lens_manifest = json.loads((lens / "manifest.json").read_text())
+    # Model comparison, head-to-head and diagnosis all need an opponent and a
+    # preference label. A single-response SFT lens has neither, so those artifacts are
+    # skipped rather than written empty or attempted and failed.
+    single_response = (lens_manifest.get("dataset_mode") == "single"
+                       or not (lens / Z_DIFF).exists())
+    if single_response:
+        print("single-response lens: model/preference artifacts will be skipped")
+
+    features = export_features(lens, analysis)
+    validation = _read_csv(analysis / "diagnosis_validation.csv")
 
     # feature -> behavior cluster (optional, from `cluster-features`)
-    clusters = _read_csv(lens / FEATURE_CLUSTERS)
+    clusters = _read_csv(analysis / FEATURE_CLUSTERS)
     fid2c, behaviors = {}, {}
     if clusters is not None and "cluster_id" in clusters.columns:
         fid2c = dict(zip(clusters["feature_id"].astype(int), clusters["cluster_id"].astype(int)))
@@ -125,13 +192,14 @@ def main() -> int:
     # the completion lens's per-side codes. A behaviour pervades responses; niche content
     # fires rarely. (Topic-based measures can't isolate niche content the prompt lens has no
     # concept for; fire rate is the robust signal.)
-    fr = feature_fire_rate(lens)
+    fr = feature_fire_rate(lens, features)
     if fr:
         features["generality"] = features["feature_id"].map(lambda f: fr.get(int(f)))
     # n_prompt_types: # prompt concepts that significantly elicit the feature — a secondary
     # context column, from the elicitation table (resolved as for the conditional export).
-    elic_for_gen = a.elicitation or (str(lens / "prompt_response_elicitation.csv")
-                                     if (lens / "prompt_response_elicitation.csv").exists() else None)
+    elic_for_gen = a.elicitation or (
+        str(analysis / "prompt_response_elicitation.csv")
+        if (analysis / "prompt_response_elicitation.csv").exists() else None)
     npt = feature_prompt_types(elic_for_gen)
     if npt:
         features["n_prompt_types"] = features["feature_id"].map(lambda f: npt.get(int(f)))
@@ -140,6 +208,21 @@ def main() -> int:
     _record("features.json")
     print(f"features.json  ({len(features)} features"
           f"{', ' + str(len(behaviors)) + ' behaviors' if behaviors else ''})")
+
+    response_clusters = export_feature_clusters(
+        clusters,
+        features,
+        kind="response",
+        summary=analysis / "feature_clusters_summary.csv",
+        diagnostics=analysis / "feature_clusters_diagnostics.csv",
+    )
+    if response_clusters is not None:
+        (out / "feature_clusters.json").write_text(_dumps(response_clusters))
+        _record("feature_clusters.json")
+        print(
+            f"feature_clusters.json  ({response_clusters['n_clusters']} communities, "
+            f"{response_clusters['n_clustered_features']} member features)"
+        )
 
     if validation is not None:
         (out / "validation.json").write_text(_dumps(_round(validation)))
@@ -159,9 +242,11 @@ def main() -> int:
         pnames_csv = pidir / "prompt_feature_names.csv"
         if pnames_csv.exists():
             prompt_names_df = pd.read_csv(pnames_csv)
-    diag = export_diagnosis(lens, features, prompt_lens=a.prompt_lens,
-                            prompt_names=prompt_names_df)
-    if diag is not None:
+    diag = None if single_response else export_diagnosis(
+        lens, features, prompt_lens=a.prompt_lens, prompt_names=prompt_names_df)
+    if single_response:
+        print("diagnosis.json  (skipped: single-response dataset has no opponents)")
+    elif diag is not None:
         if behaviors:
             diag["clusters"] = [fid2c.get(int(f), -1) for f in diag["features"]]
             diag["behaviors"] = {str(c): b for c, b in behaviors.items()}
@@ -186,7 +271,26 @@ def main() -> int:
         _record("diagnosis.json")
         _record_error("diagnosis", "no oriented bank — stub written")
 
-    ex = export_examples(lens, a.corpus, features, a.examples_per_feature)
+    dist = export_concept_distribution(lens, features)
+    if dist is not None:
+        (out / "concept_distribution.json").write_text(_dumps(dist))
+        _record("concept_distribution.json")
+        print(f"concept_distribution.json  ({dist['n_features']} concepts, "
+              f"coverage {dist['coverage']:.1%}, "
+              f"{len(dist['dead_features'])} never fire)")
+
+    coact = export_coactivation(lens, features, top_k=a.coactivation_top_k,
+                                max_pairs=a.coactivation_max_pairs,
+                                corpus_path=a.corpus)
+    if coact is not None:
+        (out / "coactivation.json").write_text(_dumps(coact))
+        _record("coactivation.json")
+        print(f"coactivation.json  ({len(coact['pairs'])} pairs"
+              f"{', truncated' if coact['truncated'] else ''})")
+
+    ex = export_examples(lens, a.corpus, features, a.examples_per_feature,
+                         n_per_group=a.examples_per_group,
+                         n_random=a.examples_random, n_boundary=a.examples_boundary)
     if ex is not None:
         # Shard per feature: data/examples/<fid>.json. The viewer fetches only the
         # selected feature's shard (lazy + cached), so covering all named features with
@@ -209,7 +313,8 @@ def main() -> int:
 
     if a.examples_by_model and diag is not None:
         try:
-            ebm = export_examples_by_model(lens, a.corpus, features, diag,
+            ebm = None if single_response else export_examples_by_model(
+                lens, a.corpus, features, diag,
                                            n_per=a.examples_by_model_per)
         except Exception as e:  # never abort the bundle over the drill-in
             _record_error("examples_by_model", e)
@@ -225,7 +330,8 @@ def main() -> int:
 
     if a.report_battles and diag is not None:
         try:
-            rb = export_report_battles(lens, a.corpus, a.prompt_lens, diag, prompt_names_df,
+            rb = None if single_response else export_report_battles(
+                lens, a.corpus, a.prompt_lens, diag, prompt_names_df,
                                        per_type=a.report_battles_per_type)
         except Exception as e:  # never abort the bundle over the drill-in
             _record_error("report_battles", e)
@@ -241,7 +347,8 @@ def main() -> int:
 
     if a.head_to_head and diag is not None and diag.get("models"):
         try:
-            h2h = export_head_to_head(lens, features, diag, min_shared=a.h2h_min_shared)
+            h2h = None if single_response else export_head_to_head(
+                lens, features, diag, min_shared=a.h2h_min_shared)
         except Exception as e:  # never abort the bundle over the head-to-head view
             _record_error("head_to_head", e)
             h2h = None
@@ -266,6 +373,17 @@ def main() -> int:
             (out / "map.json").write_text(_dumps(mp))
             _record("map.json")
             print(f"map.json  ({mp['n_sampled']} of {mp['n_total']} battles)")
+
+    if a.feature_map:
+        fm = export_feature_map(
+            lens, features, seed=0, n_neighbors=a.feature_map_neighbors)
+        if fm is None:
+            print("  (--feature-map needs sae_model.pt in --lens-dir)", file=sys.stderr)
+        else:
+            (out / "feature_map.json").write_text(_dumps(fm))
+            _record("feature_map.json")
+            print(f"feature_map.json  ({fm['n_total']} features; "
+                  f"{fm['projection']} of decoder directions)")
 
     if a.response_map:
         rm = export_response_map(lens, a.corpus, features, sample=a.map_sample,
@@ -299,11 +417,12 @@ def main() -> int:
         _record("bias_screen.json")
         print(f"bias_screen.json  ({len(bs)} features)")
 
-    cond_csv = a.conditional or (str(lens / "conditional_win_relevance.csv")
-                                 if (lens / "conditional_win_relevance.csv").exists() else None)
+    cond_csv = a.conditional or (
+        str(analysis / "conditional_win_relevance.csv")
+        if (analysis / "conditional_win_relevance.csv").exists() else None)
     cond_clu_csv = a.conditional_clustered or (
-        str(lens / "conditional_win_relevance_clustered.csv")
-        if (lens / "conditional_win_relevance_clustered.csv").exists() else None)
+        str(analysis / "conditional_win_relevance_clustered.csv")
+        if (analysis / "conditional_win_relevance_clustered.csv").exists() else None)
     cj_raw = export_conditional(cond_csv, features, a.delta)
     cj_clu = export_conditional(cond_clu_csv, features, a.delta_clustered)
     if cj_raw is not None or cj_clu is not None:
@@ -315,8 +434,9 @@ def main() -> int:
               f"{len(base['features'])} features, {base['n_significant']} sig cells"
               f"{'; +clustered' if cj_clu is not None else ''})")
 
-    elic_csv = a.elicitation or (str(lens / "prompt_response_elicitation.csv")
-                                 if (lens / "prompt_response_elicitation.csv").exists() else None)
+    elic_csv = a.elicitation or (
+        str(analysis / "prompt_response_elicitation.csv")
+        if (analysis / "prompt_response_elicitation.csv").exists() else None)
     ej = export_elicitation(elic_csv)
     if ej is not None:
         (out / "elicitation.json").write_text(_dumps(ej))
@@ -326,11 +446,130 @@ def main() -> int:
               f"{ej['n_significant']}/{ej['n_edges']} significant, "
               f"{ej['n_shown']} shown)")
 
+    if a.joint_examples:
+        # Reuse exactly the relationships shipped to the browser. This keeps the evidence
+        # payload bounded and guarantees that every selectable elicitation/conditional row
+        # can request its corresponding examples.
+        joint_pairs = set()
+        if ej is not None:
+            joint_pairs.update((int(e["px"]), int(e["cy"])) for e in ej["edges"])
+        if cj_raw is not None:
+            joint_pairs.update((int(c["pc"]), int(c["f"])) for c in cj_raw["cells"])
+        try:
+            joint = export_joint_examples(
+                lens, a.corpus, a.prompt_lens, joint_pairs,
+                per_pair=a.joint_examples_per_pair)
+        except Exception as e:  # evidence is optional; preserve the rest of the bundle
+            _record_error("joint_examples", e)
+            joint = None
+        if joint is None:
+            print("  (--joint-examples needs --corpus + --prompt-lens + an individual "
+                  "completion lens with z_a)", file=sys.stderr)
+        else:
+            joint_dir = out / "joint_examples"
+            joint_dir.mkdir(parents=True, exist_ok=True)
+            for old in joint_dir.glob("*.json"):
+                old.unlink()
+            for pc, shard in joint.items():
+                (joint_dir / f"{pc}.json").write_text(_dumps(shard))
+            _record("joint_examples/")
+            n_pairs = sum(len(shard["examples"]) for shard in joint.values())
+            n_rows = sum(len(rows) for shard in joint.values()
+                         for rows in shard["examples"].values())
+            print(f"joint_examples/  ({len(joint)} prompt shards, {n_pairs} pairs, "
+                  f"{n_rows} rows)")
+
     pf = export_prompt_features(a.prompt_interpret_dir)
     if pf is not None:
         (out / "prompt_features.json").write_text(_dumps(pf))
         _record("prompt_features.json")
         print(f"prompt_features.json  ({len(pf['features'])} prompt concepts)")
+
+        prompt_feature_frame = pd.DataFrame(pf["features"])
+        prompt_interpret = Path(a.prompt_interpret_dir)
+        prompt_cluster_payload = export_feature_clusters(
+            prompt_interpret / "prompt_feature_clusters.csv",
+            prompt_feature_frame,
+            kind="prompt",
+            summary=prompt_interpret / "prompt_feature_clusters_summary.csv",
+            diagnostics=prompt_interpret / "prompt_feature_clusters_diagnostics.csv",
+        )
+        if prompt_cluster_payload is not None:
+            (out / "prompt_feature_clusters.json").write_text(
+                _dumps(prompt_cluster_payload)
+            )
+            _record("prompt_feature_clusters.json")
+            print(
+                "prompt_feature_clusters.json  "
+                f"({prompt_cluster_payload['n_clusters']} communities, "
+                f"{prompt_cluster_payload['n_clustered_features']} member features)"
+            )
+        if a.prompt_lens:
+            prompt_dist = export_prompt_concept_distribution(
+                a.prompt_lens, prompt_feature_frame)
+            if prompt_dist is not None:
+                (out / "prompt_concept_distribution.json").write_text(
+                    _dumps(prompt_dist)
+                )
+                _record("prompt_concept_distribution.json")
+                print(
+                    "prompt_concept_distribution.json  "
+                    f"({prompt_dist['n_features']} concepts, "
+                    f"coverage {prompt_dist['coverage']:.1%}, "
+                    f"{len(prompt_dist['dead_features'])} never fire)"
+                )
+
+            prompt_coact = export_prompt_coactivation(
+                a.prompt_lens, prompt_feature_frame,
+                top_k=a.coactivation_top_k, max_pairs=a.coactivation_max_pairs,
+                corpus_path=a.corpus)
+            if prompt_coact is not None:
+                (out / "prompt_coactivation.json").write_text(_dumps(prompt_coact))
+                _record("prompt_coactivation.json")
+                print(f"prompt_coactivation.json  ({len(prompt_coact['pairs'])} pairs)")
+
+            prompt_examples = export_prompt_examples(
+                a.prompt_lens, a.corpus, prompt_feature_frame,
+                n_per=a.prompt_examples_per_feature,
+                n_per_group=a.prompt_examples_per_group,
+                n_random=a.prompt_examples_random,
+                n_boundary=a.prompt_examples_boundary)
+            if prompt_examples is not None:
+                prompt_example_dir = out / "prompt_examples"
+                prompt_example_dir.mkdir(parents=True, exist_ok=True)
+                for old in prompt_example_dir.glob("*.json"):
+                    old.unlink()
+                for feature_id, rows in prompt_examples.items():
+                    (prompt_example_dir / f"{feature_id}.json").write_text(_dumps(rows))
+                _record("prompt_examples/")
+                n_prompt_rows = sum(len(rows) for rows in prompt_examples.values())
+                print(f"prompt_examples/  ({len(prompt_examples)} feature shards, "
+                      f"{n_prompt_rows} rows)")
+
+            if a.feature_map or a.prompt_feature_map:
+                prompt_fm = export_feature_map(
+                    a.prompt_lens, prompt_feature_frame, seed=0,
+                    n_neighbors=a.feature_map_neighbors)
+                if prompt_fm is not None:
+                    (out / "prompt_feature_map.json").write_text(_dumps(prompt_fm))
+                    _record("prompt_feature_map.json")
+                    print(f"prompt_feature_map.json  ({prompt_fm['n_total']} features; "
+                          f"{prompt_fm['projection']} of decoder directions)")
+        elif a.prompt_feature_map:
+            print("  (--prompt-feature-map needs --prompt-lens)", file=sys.stderr)
+
+    if a.comparison_dir:
+        try:
+            comparison = export_paired_comparison(a.comparison_dir)
+        except Exception as e:
+            _record_error("paired_comparison", e)
+            comparison = None
+        if comparison is not None:
+            (out / "paired_comparison.json").write_text(_dumps(comparison))
+            _record("paired_comparison.json")
+            print(f"paired_comparison.json  ({len(comparison['concepts'])} concept shifts, "
+                  f"{len(comparison['contexts'])} context cells, "
+                  f"{len(comparison['examples'])} examples)")
 
     if a.prompt_map:
         if not (a.prompt_lens and a.completion_lens):

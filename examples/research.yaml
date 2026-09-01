@@ -35,7 +35,7 @@ interpreter:
 
 verifier:
   name: auto
-  sampling: stratified-random
+  sampling: quantile-stratified
   n_examples: 300
   negatives: close
   fidelity_threshold: 0.3

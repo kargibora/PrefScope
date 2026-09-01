@@ -51,8 +51,8 @@ def test_build_lens_reads_corpus(tmp_path, monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr("prefscope.pipeline.build_lens.build_lens", fake_build_lens)
-    monkeypatch.setattr(cli, "Embedder", lambda *a, **k: object())
-    monkeypatch.setattr(cli, "NpyCache", lambda *a, **k: object())
+    monkeypatch.setattr("prefscope.cli.data.Embedder", lambda *a, **k: object())
+    monkeypatch.setattr("prefscope.cli.data.NpyCache", lambda *a, **k: object())
 
     rc = cli.main(["build-lens", "--corpus", str(tmp_path / "corp.parquet"),
                    "--out", str(tmp_path / "lens"), "--device", "cpu"])

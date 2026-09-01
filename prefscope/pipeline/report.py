@@ -19,6 +19,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from prefscope.analysis.presence import annotation_flag
+from prefscope.analysis.prompt_regions import prompt_region_membership
 from prefscope.artifacts import Z_PROMPT, lens_battle_ids
 
 
@@ -134,16 +136,25 @@ def _prompt_name_map(prompt_names) -> dict:
     return {}
 
 
+def _verified_prompt_ids(prompt_names):
+    if isinstance(prompt_names, pd.DataFrame) and \
+            {"feature_id", "fidelity_pass"} <= set(prompt_names.columns):
+        return prompt_names.loc[
+            prompt_names["fidelity_pass"].map(annotation_flag),
+            "feature_id",
+        ].astype(int).tolist()
+    return None
+
+
 def prompt_concept_winrates(prompt_lens_dir, battle_ids, win, *, prompt_names=None,
-                            min_battles: int = 20) -> pd.DataFrame:
+                            min_battles: int = 20,
+                            min_prompt_activation: float = 0.0) -> pd.DataFrame:
     """Per-prompt-concept win rate for one model.
 
-    Loads the prompt lens's ``z_prompt`` (row-aligned to its ``battles.parquet`` by
-    battle id), assigns each of the model's battles its dominant prompt concept
-    (``argmax``), and returns ``win`` averaged per concept. Battles whose id is not
-    in the prompt lens are dropped; concepts seen in fewer than ``min_battles`` are
-    filtered out. Columns: ``prompt_concept`` (name if ``prompt_names`` given, else
-    id), ``win_rate``, ``n``.
+    Loads the prompt lens's ``z_prompt`` and assigns each battle to every positively
+    active concept above ``min_prompt_activation``. A battle may therefore contribute
+    to several concept-specific win rates. Concepts seen in fewer than
+    ``min_battles`` are filtered out.
     """
     plens = Path(prompt_lens_dir)
     z_prompt = np.load(plens / Z_PROMPT)
@@ -161,18 +172,25 @@ def prompt_concept_winrates(prompt_lens_dir, battle_ids, win, *, prompt_names=No
     if not rows:
         return pd.DataFrame(columns=["prompt_concept", "win_rate", "n"])
 
-    # dominant prompt concept per battle, but require a POSITIVE max — a silent (all-zero)
-    # or all-negative prompt code has no concept present, so drop it rather than let argmax
-    # assign it to feature 0 / the least-negative feature (#4).
     zc = z_prompt[rows]
-    dom = np.where(zc.max(axis=1) > 0, zc.argmax(axis=1), -1)
-    pos = dom >= 0
-    agg = (pd.DataFrame({"prompt_concept": dom[pos].astype(int), "win": win[keep][pos]})
-           .groupby("prompt_concept")["win"]
-           .agg(win_rate="mean", n="count").reset_index())
+    region_ids, membership, _ = prompt_region_membership(
+        zc, feature_ids=_verified_prompt_ids(prompt_names),
+        min_activation=min_prompt_activation)
+    win_keep = win[keep]
+    records = []
+    for j, feature_id in enumerate(region_ids):
+        present = membership[:, j]
+        n_present = int(present.sum())
+        if n_present >= int(min_battles):
+            records.append({
+                "prompt_concept": int(feature_id),
+                "win_rate": float(win_keep[present].mean()),
+                "n": n_present,
+            })
+    agg = pd.DataFrame(
+        records, columns=["prompt_concept", "win_rate", "n"])
     if agg.empty:
         return pd.DataFrame(columns=["prompt_concept", "win_rate", "n"])
-    agg = agg[agg["n"] >= min_battles].reset_index(drop=True)
 
     names = _prompt_name_map(prompt_names)
     if names:
@@ -183,13 +201,13 @@ def prompt_concept_winrates(prompt_lens_dir, battle_ids, win, *, prompt_names=No
 
 def prompt_to_response_winrates(prompt_lens_dir, battle_ids, response_codes, feature_ids,
                                 win, *, prompt_names=None, response_names=None,
-                                min_support: int = 20, top: int = 15) -> pd.DataFrame:
+                                min_support: int = 20, top: int = 15,
+                                min_prompt_activation: float = 0.0) -> pd.DataFrame:
     """Per-model prompt-concept → response-concept → Δwin edges.
 
-    For one model's battles: assign each battle its dominant prompt concept (prompt
-    lens ``z_prompt`` argmax) and, per response feature, contrast the model's win
-    rate when that response concept FIRES (oriented code > 0 — the model expressed it
-    more than its opponent) against when it does not, WITHIN the same prompt concept.
+    For one model's battles: assign each battle every positively active prompt
+    concept and, per response feature, contrast the model's win rate when that response
+    concept FIRES against when it does not, WITHIN each prompt concept.
     ``delta_win`` is that within-prompt contrast (so it answers "given this kind of
     prompt, does producing this concept help this model win"). Each edge needs at
     least ``min_support`` battles on BOTH sides; the strongest ``top`` by |Δwin| are
@@ -219,20 +237,16 @@ def prompt_to_response_winrates(prompt_lens_dir, battle_ids, response_codes, fea
     if not rows:
         return pd.DataFrame(columns=cols)
 
-    # dominant prompt concept per battle, but require a POSITIVE max — a silent (all-zero)
-    # or all-negative prompt code has no concept present. Drop those (-1) rather than let
-    # argmax assign them to feature 0 / the least-negative feature (#4, sibling of
-    # prompt_concept_winrates above).
     zc = z_prompt[rows]
-    dom = np.where(zc.max(axis=1) > 0, zc.argmax(axis=1), -1).astype(int)   # (n_keep,)
+    region_ids, membership, _ = prompt_region_membership(
+        zc, feature_ids=_verified_prompt_ids(prompt_names),
+        min_activation=min_prompt_activation)
     fired = codes[keep] > 0                                 # (n_keep, F)
     win_keep = win[keep]
 
     edges = []
-    for k in np.unique(dom):
-        if k < 0:                                          # no positive prompt concept
-            continue
-        mask = dom == k
+    for j, k in enumerate(region_ids):
+        mask = membership[:, j]
         if mask.sum() < min_support:
             continue
         fk = fired[mask]                                    # (n_k, F)

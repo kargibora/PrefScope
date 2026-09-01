@@ -30,18 +30,10 @@ def build_chat_inputs(tokenizer, prompt: str, completion: str, max_tokens: int) 
     Returns ``input_ids`` (truncated to ``max_tokens``) and the half-open response
     token span ``[resp_start, resp_end)``.
 
-    Algorithm:
-    1. Tokenize the prompt-only chat *with* a generation prompt → ``resp_start``.
-    2. Tokenize the prompt-only chat *without* a generation prompt to find the
-       user-prefix boundary inside the full chat tokenization.
-    3. Tokenize the full (user+assistant) chat without a generation prompt and
-       extract the completion tokens starting at that boundary.
-    4. Assemble ``input_ids = prompt_ids + completion_tokens`` and truncate to
-       ``max_tokens``; ``resp_end = len(input_ids)`` after truncation.
-
-    This ensures the assembled sequence is contiguous (generation-prompt tokens
-    are preserved between the user prefix and the assistant response) and that
-    ``resp_start`` correctly points to the first assistant token.
+    The full-chat tokenization is authoritative. The prompt-only chat with a
+    generation prompt must be its prefix; its length is therefore the response
+    boundary. This avoids concatenating the assistant header twice (the full chat
+    already contains that header for standard Hugging Face chat templates).
     """
     prompt_ids = list(tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
@@ -54,15 +46,20 @@ def build_chat_inputs(tokenizer, prompt: str, completion: str, max_tokens: int) 
          {"role": "assistant", "content": completion}],
         add_generation_prompt=False, tokenize=True))
 
-    if list(full_ids[:len(prompt_ids_no_gen)]) != list(prompt_ids_no_gen):
+    if list(full_ids[:len(prompt_ids_no_gen)]) != prompt_ids_no_gen:
         raise ValueError(
             "chat template is not prefix-consistent: the prompt-only tokenization "
             "is not a prefix of the full prompt+completion tokenization, so the "
             "response-span boundary cannot be located by length. This tokenizer "
             "needs a different boundary method (e.g. return_assistant_tokens_mask).")
+    if list(full_ids[:len(prompt_ids)]) != prompt_ids:
+        raise ValueError(
+            "chat template is not generation-prefix-consistent: the prompt with an "
+            "assistant generation prompt is not a prefix of the full chat. This "
+            "tokenizer needs a response-boundary method such as "
+            "return_assistant_tokens_mask.")
     resp_start = len(prompt_ids)
-    completion_tokens = full_ids[len(prompt_ids_no_gen):]
-    assembled = (prompt_ids + completion_tokens)[:max_tokens]
+    assembled = full_ids[:max_tokens]
     resp_end = len(assembled)
     resp_start = min(resp_start, resp_end)
     return {"input_ids": assembled, "resp_start": resp_start, "resp_end": resp_end}
@@ -120,7 +117,7 @@ class ActivationExtractor:
             bid = str(b["battle_id"])
             ia = build_chat_inputs(self.tokenizer, b["prompt"], b["completion_a"],
                                    self.max_tokens)
-            ib = build_chat_inputs(self.tokenizer, b["prompt"], b["completion_b"],
+            ib = build_chat_inputs(self.tokenizer, b["prompt"], b.get("completion_b", ""),
                                    self.max_tokens)
             ha = self._layer_states(ia["input_ids"])   # 1 forward (completion A)
             hb = self._layer_states(ib["input_ids"])   # 1 forward (completion B)

@@ -2,7 +2,7 @@
 target model over/under-expresses.
 
 Run:
-    uv run --extra viewer streamlit run prefscope/viewer/app.py -- \
+    prefscope-view \
         --lens-dir lens_diff_m32_k4 \
         --annotations /path/to/agreement_annotations.json
 
@@ -20,15 +20,10 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# Streamlit runs this file as a script, and the package isn't installed
-# (uv package=false), so add the project root to sys.path before importing prefscope.
-_ROOT = Path(__file__).resolve().parents[2]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-
-from prefscope.viewer.data import (  # noqa: E402
+from prefscope.viewer.data import (
     diagnosis_battles, feature_table, load_lens_for_view, top_battles,
 )
+from prefscope.analysis.presence import annotation_flag
 
 
 def _args():
@@ -145,7 +140,7 @@ def main() -> None:
         only_pass = False
         if "fidelity_pass" in ftable.columns:
             only_pass = st.checkbox("Show only fidelity-passing axes", value=False)
-        view = ftable[ftable["fidelity_pass"] == True] if only_pass else ftable  # noqa: E712
+        view = ftable[ftable["fidelity_pass"].map(annotation_flag)] if only_pass else ftable
         st.dataframe(view, use_container_width=True, hide_index=True)
 
     with tab_detail:
@@ -189,7 +184,7 @@ def main() -> None:
                 st.markdown(f"**Prompt**\n\n{r['prompt']}")
                 lc, rc = st.columns(2)
                 lc.markdown(f"**A — {r.get('model_a', '?')}**\n\n{r['completion_a']}")
-                rc.markdown(f"**B — {r.get('model_b', '?')}**\n\n{r['completion_b']}")
+                rc.markdown(f"**B — {r.get('model_b', '?')}**\n\n{r.get('completion_b', '')}")
                 st.caption(f"judge y = {r.get('y_judge', '?')}")
 
     with tab_reward:
@@ -266,7 +261,7 @@ def main() -> None:
                         ddf, x="delta_vs_pool", y="win_assoc", hover_name=hover,
                         labels={"delta_vs_pool": "← does LESS than pool   ·   does MORE →",
                                 "win_assoc": "← humans penalise   ·   reward →"},
-                        title=f"{model}: gap quadrant — top-left = under-does a rewarded behaviour")
+                        title=f"{model}: gap quadrant — top-left = under-does a preference-associated concept")
                     fig.add_hline(y=0, line_dash="dot")
                     fig.add_vline(x=0, line_dash="dot")
                     st.plotly_chart(fig, use_container_width=True)

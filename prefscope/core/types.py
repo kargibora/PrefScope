@@ -30,7 +30,7 @@ class PairItem:
 
 @dataclass
 class SideVectors:
-    """Raw per-side vectors from an ActivationSource.
+    """Raw per-side vectors for one comparison.
 
     a/b are (n, d): n=1 for embeddings, n=#tokens for token activations.
     """

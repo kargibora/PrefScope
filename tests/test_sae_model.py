@@ -2,7 +2,9 @@ import numpy as np
 import pytest
 import torch
 
-from prefscope.sae.model import BatchTopKSAE, SimpleTopKSAE, encode_in_batches
+from prefscope.sae.model import (
+    BatchTopKSAE, NonnegativeBatchTopKSAE, SimpleTopKSAE, encode_in_batches,
+    resolve_sae_type)
 
 REQUIRED_KEYS = {"encoder.weight", "decoder.weight", "input_bias",
                  "neuron_bias", "threshold", "steps_since_activation"}
@@ -74,7 +76,8 @@ def test_matryoshka_norm_mse_averages_prefix_levels():
     x = torch.randn(6, 8)
     recon, info = m(x)
     activ = info["activations"]
-    partial = activ.clone(); partial[:, 4:] = 0
+    partial = activ.clone()
+    partial[:, 4:] = 0
     prefix4 = float(m._normalized_mse(m.decoder(partial) + m.input_bias, x))
     full = float(m._normalized_mse(recon, x))
     matry = float(m.matryoshka_norm_mse(recon, activ, x))
@@ -89,8 +92,10 @@ def test_matryoshka_norm_mse_mode_independent():
     x = torch.randn(6, 8)
     recon, info = m(x)
     activ = info["activations"]
-    m.train(); a = float(m.matryoshka_norm_mse(recon, activ, x))
-    m.eval();  b = float(m.matryoshka_norm_mse(recon, activ, x))
+    m.train()
+    a = float(m.matryoshka_norm_mse(recon, activ, x))
+    m.eval()
+    b = float(m.matryoshka_norm_mse(recon, activ, x))
     assert a == pytest.approx(b)       # no longer gated on self.training (the bug)
 
 
@@ -102,3 +107,37 @@ def test_no_prefix_matryoshka_is_plain_norm_mse():
     recon, info = m(x)
     assert float(m.matryoshka_norm_mse(recon, info["activations"], x)) == \
         pytest.approx(float(m._normalized_mse(recon, x)))
+
+
+def test_nonnegative_batchtopk_never_emits_negative_codes():
+    torch.manual_seed(4)
+    m = NonnegativeBatchTopKSAE(
+        input_dim=8, m_total_neurons=12, k_active_neurons=2)
+    with torch.no_grad():
+        m.neuron_bias.fill_(10.0)  # every eligible preactivation is strictly positive
+    x = torch.randn(7, 8)
+    m.train()
+    _, train_info = m(x)
+    assert (train_info["activations"] >= 0).all()
+    assert int((train_info["activations"] != 0).sum()) == 14
+
+    m.threshold.fill_(0.1)
+    m.eval()
+    assert (m.encode(x) >= 0).all()
+
+
+def test_auto_sae_resolution_is_representation_aware():
+    assert resolve_sae_type("auto", "difference") == "batchtopk"
+    assert resolve_sae_type("auto", "individual") == "batchtopk-relu"
+    assert resolve_sae_type("auto", "prompt") == "batchtopk-relu"
+    assert resolve_sae_type("signed-batchtopk", "individual") == "batchtopk"
+
+
+def test_nonnegative_auxiliary_topk_never_selects_live_zero_ties():
+    m = NonnegativeBatchTopKSAE(
+        input_dim=4, m_total_neurons=4, k_active_neurons=1, aux_k=2,
+        dead_neuron_threshold_steps=0)
+    m.steps_since_activation[:] = torch.tensor([1, 1, 0, 0])
+    idx, values = m._aux_topk(torch.zeros(3, 4))
+    assert idx is not None and values is not None
+    assert set(idx.flatten().tolist()) <= {0, 1}

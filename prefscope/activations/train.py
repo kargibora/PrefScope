@@ -14,7 +14,7 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.optim import AdamW
+from torch.optim import Adam
 
 from prefscope.activations.cache import train_val_row_indices
 from prefscope.sae.model import BatchTopKSAE
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def train_token_sae(cache, *, m_total: int, k: int,
-                    matryoshka_prefix: Sequence[int] = (8,),
+                    matryoshka_prefix: Sequence[int] = (),
                     val_frac: float = 0.05, max_val_tokens: int | None = 200_000,
                     max_train_tokens: int | None = None,
                     n_epochs: int = 2, batch: int = 4096, lr: float = 5e-4,
@@ -47,12 +47,10 @@ def train_token_sae(cache, *, m_total: int, k: int,
                          k_active_neurons=k, dead_neuron_threshold_steps=dead_threshold_steps,
                          matryoshka_prefix_lengths=list(matryoshka_prefix)).to(dev)
     prefix = model.matryoshka_prefix_lengths
-    opt = AdamW(model.parameters(), lr=lr)
+    opt = Adam(model.parameters(), lr=lr)
 
     # validation rows are small enough to hold on the GPU
     Xv = torch.from_numpy(np.asarray(cache.acts[val_idx], dtype=np.float32)).to(dev)
-    var_x_val = Xv.var().item()
-
     rng = np.random.default_rng(seed)
     n_train = len(train_idx)
     n_batches = (n_train + batch - 1) // batch
@@ -86,10 +84,10 @@ def train_token_sae(cache, *, m_total: int, k: int,
         with torch.no_grad():
             v_recon, v_info = model(Xv)
             v_mse = F.mse_loss(v_recon, Xv).item()
-            ev = 1.0 - v_mse / var_x_val
             v_norm_mse = float(model._normalized_mse(v_recon, Xv))
+            ev = 1.0 - v_norm_mse
             v_active = float((v_info["activations"] != 0).float().sum(dim=-1).mean())
-            v_dead = int((model.steps_since_activation > dead_threshold_steps).sum().item())
+            v_dead = int(((v_info["activations"] != 0).sum(dim=0) == 0).sum().item())
         log_rows.append({"epoch": epoch, "train_main_mean": epoch_main / max(1, n_batches),
                          "train_aux_mean": epoch_aux / max(1, n_batches), "val_mse": v_mse,
                          "val_norm_mse": v_norm_mse, "val_ev": ev, "val_active": v_active,
@@ -112,8 +110,11 @@ def train_token_sae(cache, *, m_total: int, k: int,
 
     config = {"sae_type": "batchtopk", "input_dim": d_in, "m_total_neurons": m_total,
               "k_active_neurons": k, "aux_k": model.aux_k,
+              "activation_polarity": "signed", "code_semantics": "axis",
+              "selection_rule": "batchtopk-absolute",
               "dead_neuron_threshold_steps": dead_threshold_steps,
               "matryoshka_prefix_lengths": prefix, "lr": lr, "batch": batch,
+              "optimizer": "adam", "weight_decay": 0.0, "seed": seed,
               "best_val_norm_mse": best_val,
               "best_val_ev": float(1.0 - best_val) if np.isfinite(best_val) else None,
               "dead_neurons": v_dead, "n_train_tokens": int(n_train),

@@ -11,6 +11,7 @@ __pycache__/
 data/*.parquet
 features/*.npy
 features/*.parquet
+/runs/
 
 # Caches
 .cache/
@@ -23,18 +24,34 @@ features/*.parquet
 .idea/
 .vscode/
 
-# Local credentials
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+.envrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+*.kdbx
+credentials*.json
+service-account*.json
+secrets*.json
 hpc_key
 hpc_key.pub
 hpc_key-cert.pub
 
 # Generated lens artifacts
 lens_*/
+/artifacts/
+/local-data/
 
 # Local data and working notes
 /data/
 docs/STATUS.md
 docs/design/
+/docs/proposal/
 
 # Generated static viewer bundle
 /viewer-data/

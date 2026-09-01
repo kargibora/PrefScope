@@ -34,7 +34,7 @@ def test_diagnose_writes_csv(tmp_path, monkeypatch):
         return df, {"model": model, "n_battles": 2, "win_rate": 1.0, "n_features": 2}
 
     monkeypatch.setattr("prefscope.pipeline.diagnose.run_diagnose", fake_run_diagnose)
-    monkeypatch.setattr(cli, "Embedder", lambda *a, **k: object())
+    monkeypatch.setattr("prefscope.cli.analysis.Embedder", lambda *a, **k: object())
     monkeypatch.setattr("prefscope.encode.sae.SAEProjector", lambda *a, **k: object())
 
     out_csv = tmp_path / "diagnosis.csv"

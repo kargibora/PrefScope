@@ -1,7 +1,8 @@
 # Add an SAE
 
 The SAE that turns embeddings into sparse codes is a registry component (kind
-`sae`). The three built-ins are `batchtopk`, `jumprelu`, and `simple-topk`; this
+`sae`). The built-ins are signed `batchtopk` (`signed-batchtopk` alias), non-negative
+`batchtopk-relu`, `jumprelu`, and `simple-topk`; this
 guide shows how to add your own and select it with `build-lens --sae-type <name>`.
 
 Unlike the analysis components, an SAE is a `torch.nn.Module` used at both training

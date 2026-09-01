@@ -15,7 +15,8 @@ from prefscope.interpret.prompts import (
     load_prompt, parse_label, parse_presence, shield, truncate,
 )
 from prefscope.interpret.select import (
-    holdout_buckets, name_verify_split, select_negatives, top_pairs,
+    holdout_buckets, name_verify_split, normalize_verification_sampling,
+    quantile_stratified_sample, select_negatives,
 )
 
 # Same untrusted-data guard the namer uses: the response/prompt text is shielded, but a
@@ -117,7 +118,7 @@ def _presence_metrics(sae: np.ndarray, llm: np.ndarray) -> dict:
             "p_value": p_value}
 
 
-def verify_single_text_features(texts, z: np.ndarray, names: pd.DataFrame, client, *,
+def verify_single_text_features(texts, z, names: pd.DataFrame, client, *,
                                 negatives: str = "random", embeddings=None,
                                 n_active: int = 10, n_zero: int = 10,
                                 verify_frac: float = 0.2, seed: int = 0,
@@ -125,7 +126,8 @@ def verify_single_text_features(texts, z: np.ndarray, names: pd.DataFrame, clien
                                 concurrency: int = 1, instruction_ids=None,
                                 contexts=None, min_success_rate: float = 0.8,
                                 min_bucket: int = 5, sampling: str = "extremes",
-                                n_examples: int | None = None) -> pd.DataFrame:
+                                n_examples: int | None = None, features=None,
+                                on_result=None) -> pd.DataFrame:
     """Held-out fidelity for a single-text concept lens (prompts or responses).
 
     Same idea as ``verify_features`` but the unit is one text, not an A/B battle:
@@ -133,26 +135,90 @@ def verify_single_text_features(texts, z: np.ndarray, names: pd.DataFrame, clien
     PRESENT) and silent texts (ABSENT), ask the LLM whether each text exhibits
     the named concept, and correlate the SAE's presence (active vs silent) with
     the LLM's Yes/No. A feature passes if correlation >= threshold AND the
-    Bonferroni-adjusted p < 0.05. ``sampling='stratified-random'`` samples
-    uniformly from the positive and silent held-out pools instead of testing only
-    the most extreme activators. ``n_examples`` is a total budget split across
-    those two buckets.
+    Bonferroni-adjusted p < 0.05. ``random-active`` samples uniformly from the
+    positive held-out pool; ``quantile-stratified`` covers weak through strong
+    activations. The legacy ``stratified-random`` spelling aliases
+    ``random-active``. ``n_examples`` is a total budget split across buckets.
     """
-    if sampling not in ("extremes", "stratified-random"):
-        raise ValueError(
-            "sampling must be 'extremes' or 'stratified-random', "
-            f"got {sampling!r}")
+    sampling = normalize_verification_sampling(sampling)
     if n_examples is not None:
         if n_examples < 2:
             raise ValueError("n_examples must be >= 2")
         n_active = (int(n_examples) + 1) // 2
         n_zero = int(n_examples) // 2
-    z = np.asarray(z, dtype=np.float32)
+    # An individual paired lens may provide (z_a, z_b) as two memory maps. Construct only
+    # the feature column currently under test; materializing the full stacked dictionary
+    # would make a one-feature verification consume many gigabytes.
+    paired_codes = isinstance(z, tuple)
+    if paired_codes:
+        if len(z) != 2 or z[0].shape[1] != z[1].shape[1]:
+            raise ValueError("paired verification codes must be aligned (z_a, z_b) matrices")
+        if len(texts) != z[0].shape[0] + z[1].shape[0]:
+            raise ValueError("paired verification text/code row mismatch")
+    else:
+        z = np.asarray(z, dtype=np.float32)
+
+    def feature_column(f: int) -> np.ndarray:
+        if paired_codes:
+            return np.concatenate([
+                np.asarray(z[0][:, f], dtype=np.float32),
+                np.asarray(z[1][:, f], dtype=np.float32),
+            ])
+        return z[:, f]
     ids = list(instruction_ids) if instruction_ids is not None else list(range(len(texts)))
+    if len(ids) != len(texts):
+        raise ValueError("instruction_ids must align one-to-one with verification texts")
+
+    def ranked_unique(indices, limit: int, *, excluded=()):
+        """Take first-ranked response per instruction, preserving input order."""
+        seen = set(excluded)
+        out = []
+        for i in indices:
+            key = ids[int(i)]
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(int(i))
+            if len(out) >= limit:
+                break
+        return out
+
+    def random_unique(indices, limit: int, rng, *, excluded=()):
+        """Uniformly sample instructions, then one eligible response per instruction."""
+        by_instruction = {}
+        blocked = set(excluded)
+        for i in indices:
+            key = ids[int(i)]
+            if key not in blocked:
+                by_instruction.setdefault(key, []).append(int(i))
+        keys = list(by_instruction)
+        if not keys:
+            return []
+        chosen = rng.choice(len(keys), size=min(limit, len(keys)), replace=False)
+        return [int(rng.choice(by_instruction[keys[int(k)]])) for k in chosen]
+
+    def quantile_unique(indices, z_col, limit: int, rng, *, excluded=()):
+        """One response per instruction, stratified by activation magnitude."""
+        by_instruction = {}
+        blocked = set(excluded)
+        for i in indices:
+            key = ids[int(i)]
+            if key not in blocked:
+                by_instruction.setdefault(key, []).append(int(i))
+        representatives = np.asarray([
+            int(rng.choice(rows)) for rows in by_instruction.values()
+        ], dtype=int)
+        return quantile_stratified_sample(
+            representatives, z_col, limit, rng).astype(int).tolist()
+
     _, verify_mask = name_verify_split(ids, verify_frac)
     verify_pool = np.where(verify_mask)[0]
     testable, abstained = _split_testable(names)   # abstained concepts aren't sent to the LLM
     m_tested = len(testable)                        # Bonferroni over TESTED concepts only
+    if features is not None:
+        wanted = {int(f) for f in features}
+        testable = testable[testable["feature_id"].astype(int).isin(wanted)]
+        abstained = abstained[abstained["feature_id"].astype(int).isin(wanted)]
     # When contexts (the user prompts) are supplied — the completion/individual lens —
     # judge the concept in the RESPONSE with the request as context (#6). A prompt lens
     # passes no contexts: the text IS the prompt, so the text-only template is correct.
@@ -162,35 +228,43 @@ def verify_single_text_features(texts, z: np.ndarray, names: pd.DataFrame, clien
     def _verify_one(frow) -> dict:
         f = int(frow["feature_id"])
         concept = frow["concept"]
+        z_col = feature_column(f)
         rng = np.random.default_rng([seed, f])
-        if sampling == "stratified-random":
-            active_pool = verify_pool[z[verify_pool, f] > 0]
-            active = (rng.choice(active_pool, size=min(n_active, len(active_pool)), replace=False)
-                      if len(active_pool) else np.array([], dtype=int))
-            zero_pool = verify_pool[z[verify_pool, f] == 0]
-            zero = (rng.choice(zero_pool, size=min(n_zero, len(zero_pool)), replace=False)
-                    if len(zero_pool) else np.array([], dtype=int))
-            sel = {"active": active, "zero": zero}
+        active_pool = verify_pool[z_col[verify_pool] > 0]
+        if sampling == "random-active":
+            active = random_unique(active_pool, n_active, rng)
+        elif sampling == "quantile-stratified":
+            active = quantile_unique(active_pool, z_col, n_active, rng)
         else:
-            sel = top_pairs(z[:, f], verify_pool, n_active, n_zero, rng)
-        # "active" = the feature actually fires (z != 0); silent = z == 0.
-        active = [int(i) for i in sel["active"] if z[int(i), f] != 0]
+            ranked = active_pool[np.argsort(-z_col[active_pool], kind="stable")]
+            active = ranked_unique(ranked, n_active)
+        # Each held-out instruction contributes at most one response. This avoids treating
+        # correlated A/B answers to the same prompt as independent observations in p-values.
+        active_ids = {ids[i] for i in active}
+        zero_pool = verify_pool[z_col[verify_pool] == 0]
         if negatives == "random":
-            neg = [int(i) for i in sel["zero"]]
+            neg = random_unique(zero_pool, n_zero, rng, excluded=active_ids)
         else:
-            neg = [int(i) for i in select_negatives(
-                z[:, f], verify_pool, n_zero, strategy=negatives,
-                active_idx=active, embeddings=embeddings, rng=rng)]
+            # Similarity sampler returns response-ranked candidates; take the first response
+            # from each still-unused instruction. A modest over-request handles duplicate
+            # A/B rows without asking the sampler to return/rank the entire silent corpus.
+            rank_budget = min(len(zero_pool), max(100, 20 * n_zero))
+            ranked_neg = select_negatives(
+                z_col, verify_pool, rank_budget, strategy=negatives,
+                active_idx=active, embeddings=embeddings, rng=rng)
+            neg = ranked_unique(ranked_neg, n_zero, excluded=active_ids)
         idxs = active + neg
         sae_all = np.array([1] * len(active) + [0] * len(neg))
         llm_all = []
         for i in idxs:
             if use_ctx:
-                prompt = tmpl.format(concept=concept,
+                prompt = tmpl.format(concept=shield(str(concept)),
                                      request=shield(truncate(contexts[i], TRUNC_PROMPT)),
                                      response=shield(truncate(texts[i], TRUNC_TEXT)))
             else:
-                prompt = tmpl.format(concept=concept, text=shield(truncate(texts[i], TRUNC_TEXT)))
+                prompt = tmpl.format(
+                    concept=shield(str(concept)),
+                    text=shield(truncate(texts[i], TRUNC_TEXT)))
             try:
                 out = client.raw([{"role": "system", "content": _VERIFY_SYSTEM},
                                   {"role": "user", "content": prompt}], max_tokens=4)
@@ -215,22 +289,30 @@ def verify_single_text_features(texts, z: np.ndarray, names: pd.DataFrame, clien
 
     cols = ["feature_id", "concept", "skipped_reason", "fp_rate", "n", "n_attempted",
             "n_failed", "success_rate", "n_pos_ok", "n_neg_ok", "agreement", "precision",
-            "recall", "f1", "correlation", "sign", "p_value", "p_bonferroni", "fidelity_pass"]
-    rows = _run(_verify_one, [r for _, r in testable.iterrows()], concurrency,
-                desc="verifying features")
+            "recall", "f1", "correlation", "sign", "p_value", "p_bonferroni",
+            "verification_sampling", "verification_scope", "fidelity_pass"]
+    def _finalize(row: dict) -> dict:
+        p = row["p_value"]
+        corr = row["correlation"]
+        p_bonferroni = min(1.0, p * max(1, m_tested)) if np.isfinite(p) else float("nan")
+        sign = int(np.sign(corr)) if np.isfinite(corr) else pd.NA
+        passed = bool(
+            np.isfinite(corr) and corr >= fidelity_threshold
+            and np.isfinite(p_bonferroni) and p_bonferroni < 0.05
+            and row["success_rate"] >= min_success_rate
+            and row["n_pos_ok"] >= min_bucket
+            and row["n_neg_ok"] >= min_bucket)
+        return {**row, "skipped_reason": "", "sign": sign,
+                "verification_sampling": sampling,
+                "verification_scope": ("extreme_fidelity" if sampling == "extremes"
+                                       else "activation_distribution"),
+                "p_bonferroni": p_bonferroni, "fidelity_pass": passed}
+
+    rows = _run(lambda row: _finalize(_verify_one(row)),
+                [r for _, r in testable.iterrows()], concurrency,
+                desc="verifying features", usage=client, on_result=on_result)
     out = pd.DataFrame(rows)
     if not out.empty:
-        out["skipped_reason"] = ""
-        out["p_bonferroni"] = (out["p_value"] * max(1, m_tested)).clip(upper=1.0)
-        out["sign"] = np.sign(out["correlation"]).astype("Int64")
-        # A feature passes only with a faithful, SIGNIFICANT signal AND enough successful
-        # annotations to trust it — a high success rate and a minimum of surviving positive
-        # AND control judgments (#2). Three lucky aligned survivors no longer pass.
-        out["fidelity_pass"] = ((out["correlation"] >= fidelity_threshold)
-                                & (out["p_bonferroni"] < 0.05)
-                                & (out["success_rate"] >= min_success_rate)
-                                & (out["n_pos_ok"] >= min_bucket)
-                                & (out["n_neg_ok"] >= min_bucket))
         out = out.reindex(columns=cols)
     else:
         out = pd.DataFrame(columns=cols)
@@ -252,7 +334,9 @@ def verify_features(battles: pd.DataFrame, z_diff: np.ndarray,
                     fidelity_threshold: float = 0.3, concurrency: int = 1,
                     min_success_rate: float = 0.8, min_bucket: int = 5,
                     sampling: str = "extremes",
-                    n_examples: int | None = None) -> pd.DataFrame:
+                    n_examples: int | None = None, features=None,
+                    on_result=None) -> pd.DataFrame:
+    sampling = normalize_verification_sampling(sampling)
     bucket_limits = None
     if n_examples is not None:
         if n_examples < 3:
@@ -260,10 +344,15 @@ def verify_features(battles: pd.DataFrame, z_diff: np.ndarray,
         q, r = divmod(int(n_examples), 3)
         bucket_limits = {"pos": q + int(r > 0), "neg": q + int(r > 1), "tie": q}
         n_per_bucket = max(bucket_limits.values())
-    _, verify_mask = name_verify_split(battles["instruction_id"].tolist(), verify_frac)
+    from prefscope.interpret.select import split_group_ids
+    _, verify_mask = name_verify_split(split_group_ids(battles), verify_frac)
     verify_pool = np.where(verify_mask)[0]
     testable, abstained = _split_testable(names)   # abstained concepts aren't sent to the LLM
     m_tested = len(testable)                        # Bonferroni over TESTED concepts only
+    if features is not None:
+        wanted = {int(f) for f in features}
+        testable = testable[testable["feature_id"].astype(int).isin(wanted)]
+        abstained = abstained[abstained["feature_id"].astype(int).isin(wanted)]
     tmpl = load_prompt("pairwise-annotate-singleconcept")
 
     def _verify_one(frow) -> dict:
@@ -280,7 +369,8 @@ def verify_features(battles: pd.DataFrame, z_diff: np.ndarray,
         n_attempted = 0
         for i in idxs:
             n_attempted += 1
-            prompt = tmpl.format(text=_text_block(battles, i), concept=concept)
+            prompt = tmpl.format(
+                text=_text_block(battles, i), concept=shield(str(concept)))
             try:
                 out = client.raw([{"role": "system", "content": _VERIFY_SYSTEM},
                                   {"role": "user", "content": prompt}],
@@ -303,24 +393,30 @@ def verify_features(battles: pd.DataFrame, z_diff: np.ndarray,
 
     cols = ["feature_id", "concept", "skipped_reason", "n", "n_attempted", "n_failed",
             "success_rate", "n_pos_ok", "n_neg_ok", "agreement", "precision", "recall",
-            "f1", "correlation", "sign", "p_value", "p_bonferroni", "fidelity_pass"]
-    rows = _run(_verify_one, [r for _, r in testable.iterrows()], concurrency,
-                desc="verifying features")
+            "f1", "correlation", "sign", "p_value", "p_bonferroni",
+            "verification_sampling", "verification_scope", "fidelity_pass"]
+    def _finalize(row: dict) -> dict:
+        p = row["p_value"]
+        corr = row["correlation"]
+        p_bonferroni = min(1.0, p * max(1, m_tested)) if np.isfinite(p) else float("nan")
+        sign = int(np.sign(corr)) if np.isfinite(corr) else pd.NA
+        passed = bool(
+            np.isfinite(corr) and corr >= fidelity_threshold
+            and np.isfinite(p_bonferroni) and p_bonferroni < 0.05
+            and row["success_rate"] >= min_success_rate
+            and row["n_pos_ok"] >= min_bucket
+            and row["n_neg_ok"] >= min_bucket)
+        return {**row, "skipped_reason": "", "sign": sign,
+                "verification_sampling": sampling,
+                "verification_scope": ("extreme_fidelity" if sampling == "extremes"
+                                       else "activation_distribution"),
+                "p_bonferroni": p_bonferroni, "fidelity_pass": passed}
+
+    rows = _run(lambda row: _finalize(_verify_one(row)),
+                [r for _, r in testable.iterrows()], concurrency,
+                desc="verifying features", usage=client, on_result=on_result)
     out = pd.DataFrame(rows)
     if not out.empty:
-        out["skipped_reason"] = ""
-        # Bonferroni over the TESTED concepts only (abstentions excluded).
-        out["p_bonferroni"] = (out["p_value"] * max(1, m_tested)).clip(upper=1.0)
-        # sign: +1 means the concept (as named) tracks high activation; -1 means the name's
-        # polarity is flipped. Fidelity requires a POSITIVE correlation, so a flipped-polarity
-        # name (the name describes the opposite pole) FAILS — a passing name always describes
-        # the positive pole, and downstream "more of X" stays sign-agnostic and correct (#2).
-        out["sign"] = np.sign(out["correlation"]).astype("Int64")
-        out["fidelity_pass"] = ((out["correlation"] >= fidelity_threshold)
-                                & (out["p_bonferroni"] < 0.05)
-                                & (out["success_rate"] >= min_success_rate)
-                                & (out["n_pos_ok"] >= min_bucket)
-                                & (out["n_neg_ok"] >= min_bucket))
         out = out.reindex(columns=cols)
     else:
         out = pd.DataFrame(columns=cols)

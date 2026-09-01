@@ -6,7 +6,11 @@ def test_sae_config_defaults():
     assert c.m == 128
     assert c.k == 16
     assert c.input_rep == "individual"
-    assert c.matryoshka_prefix == (8,)
+    assert c.sae_type == "auto"
+    assert c.matryoshka_prefix == ()
+    assert c.sparsity_coef == 1e-3
+    assert c.bandwidth == 1e-3
+    assert c.sparsity_warmup_steps == 0
 
 
 def test_train_config_defaults_and_nesting():

@@ -1,4 +1,7 @@
-"""Load WIMHF prompt templates (vendored verbatim) and parse model output."""
+"""Load prompt templates adapted from WIMHF and parse model output.
+
+See ``prompts/WIMHF_LICENSE.txt`` for the upstream copyright and license.
+"""
 from __future__ import annotations
 
 import json
@@ -75,7 +78,7 @@ def parse_concept(response: str) -> str:
         c = _clean_phrase(quotes[-1])
         if _looks_like_concept(c):
             return c
-    lines = [ln for ln in (l.strip() for l in response.splitlines()) if ln]
+    lines = [ln for ln in (line.strip() for line in response.splitlines()) if ln]
     cand = _clean_phrase(lines[-1].rstrip('"')) if lines else ""  # completion stub: 'phrase"'
     return cand if _looks_like_concept(cand) else ""
 
@@ -119,6 +122,36 @@ def parse_concept_result(response: str) -> dict:
     concept = parse_concept(response)
     return {"status": "ok" if concept else "insufficient_evidence",
             "concept": concept, "confidence": ""}
+
+
+def parse_support_audit(response: str, *, n_active: int, n_control: int) -> dict:
+    """Parse the independent literal-presence audit for a proposed concept."""
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", response or "").strip()
+    try:
+        obj = json.loads(cleaned)
+    except Exception:
+        obj = None
+
+    def bool_list(key: str, expected: int):
+        values = obj.get(key) if isinstance(obj, dict) else None
+        if (not isinstance(values, list) or len(values) != expected
+                or any(type(v) is not bool for v in values)):
+            return None
+        return values
+
+    active = bool_list("active_matches", n_active)
+    control = bool_list("control_matches", n_control)
+    valid = active is not None and control is not None
+    passed = bool(valid and n_active > 0 and n_control > 0
+                  and all(active) and not any(control))
+    return {
+        "active_matches": active,
+        "control_matches": control,
+        "valid": valid,
+        "pass": passed,
+        "active_support": int(sum(active)) if active is not None else 0,
+        "control_violations": int(sum(control)) if control is not None else 0,
+    }
 
 
 def parse_label(raw: str):
@@ -179,7 +212,9 @@ def shield(text: str) -> str:
     """Neutralize the <example> delimiter inside UNTRUSTED dataset text, so a response
     can't close the block early and inject instructions after it (prompt-injection guard).
     Paired with the system-prompt rule that <example> content is data, never instructions."""
-    return (text or "").replace("</example", "<\\/example").replace("<example", "<\\example")
+    import re
+    return re.sub(r"<\s*(/?)\s*example", r"<\\\1example", text or "",
+                  flags=re.IGNORECASE)
 
 
 def fmt_example(idx: int, row: dict) -> str:

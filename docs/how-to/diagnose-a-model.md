@@ -2,22 +2,21 @@
 
 Goal: given a trained, named lens, find out what a specific model **over- or
 under-expresses** relative to its peers, and whether those tendencies help or hurt
-its win rate. Two ways: the `LoadedLens` Python API (good for notebooks / custom
+its win rate. Two ways: the `Lens` Python API (good for notebooks / custom
 data) and the `diagnose` CLI (good for a full annotation set).
 
 The orientation convention: `y_a` is the model under study ("self"), `y_b` is its
 opponent ("other"); codes are self-minus-other and `pref` = P(self preferred).
 
-## A. Python — `LoadedLens`
+## A. Python — `Lens`
 
-`LoadedLens` is the reusable inference artifact: load the lens once, then project
+`Lens` is the reusable inference artifact: load the lens once, then project
 any dataset and analyze it on CPU.
 
 ```python
-from prefscope.api.loaded_lens import LoadedLens
-from prefscope.core import PairItem
+from prefscope import Lens, PairItem
 
-lens = LoadedLens.from_dir("lenses/mylens", device="cpu")   # or device="cuda" for project()
+lens = Lens.load("lenses/mylens", device="cpu")   # or device="cuda" for project()
 
 # each item: the studied model's answer (y_a) vs a baseline (y_b)
 data = [
@@ -43,7 +42,8 @@ Reading `diagnose`:
 - **`outcome_assoc` > 0** → doing more of it goes with winning.
 
 Pairing them separates strengths from weaknesses: *over-express + helps* = a
-strength; *under-express + helps* = a gap worth closing.
+strength; *under-express + preference-associated* = a hypothesis worth inspecting, not
+proof that increasing the feature would help.
 
 If your lens has `feature_fidelity.csv`, pass `fidelity_only=True` to
 `lens.diagnose(...)` to restrict the report to verified axes.
@@ -56,8 +56,8 @@ For a full OpenJury-style annotation file, the CLI projects + aggregates in one 
 prefscope diagnose \
     --lens-dir lenses/mylens \
     --annotations /path/to/annotations.json \
-    --model my-model \                          # the target to orient as "self"
-    --fidelity lenses/mylens/feature_fidelity.csv \   # attach names; restrict to verified
+    --model my-model \
+    --fidelity results/mylens/feature_fidelity.csv \
     --out diagnosis.csv \
     --device cuda
 ```
@@ -69,7 +69,7 @@ under-expressed concepts. Add `--all-features` to include unverified axes.
 View it in the quadrant tab of the Streamlit app:
 
 ```bash
-uv run --extra viewer streamlit run prefscope/viewer/app.py -- \
+prefscope-view \
     --lens-dir lenses/mylens --diagnosis diagnosis.csv
 ```
 
@@ -80,11 +80,16 @@ oriented-code bank, then regress:
 
 ```bash
 prefscope build-bank --lens-dir lenses/mylens \
-    --from-embeddings emb/ --out bank/
+    --from-embeddings emb/ --label human --corpus corpus.parquet \
+    --out lenses/mylens/bank
 prefscope win-relevance --lens-dir lenses/mylens \
     --corpus corpus.parquet --out win_relevance.csv
-prefscope validate-diagnosis --bank bank/ \
+prefscope validate-diagnosis --bank lenses/mylens/bank \
     --win-relevance win_relevance.csv --out validation.csv --loo
 ```
+
+`--label` defaults to `judge`, which reads a `y_judge` column that corpus-derived
+embedding dumps do not carry; use `--label human --corpus` for those. Write the bank
+to `<lens-dir>/bank` — the viewer export looks for it only there.
 
 `--loo` refits the reward weights leaving each model out — an honest held-out R².

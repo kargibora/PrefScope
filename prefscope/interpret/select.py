@@ -8,6 +8,57 @@ import numpy as np
 from prefscope.core import registry
 
 
+# Hard-negative mining is only a candidate-ranking step: scanning every 4,096-d
+# embedding for every feature is both unnecessary and catastrophic at corpus scale.
+# Four thousand candidates gives a broad deterministic search pool while keeping one
+# feature's temporary matrix around 66 MiB in float32 for Qwen3-Embedding-8B.
+_SIMILAR_CANDIDATE_CAP = 4_000
+
+_SAMPLING_ALIASES = {
+    # Historical name: this sampled uniformly inside each active/sign bucket; it
+    # did not stratify by activation magnitude. Keep accepting it for checkpoints
+    # and scripts, but expose the honest name in new CLI output.
+    "stratified-random": "random-active",
+}
+
+
+def normalize_verification_sampling(sampling: str) -> str:
+    """Return the canonical verification sampling name."""
+    value = _SAMPLING_ALIASES.get(str(sampling), str(sampling))
+    valid = {"extremes", "random-active", "quantile-stratified"}
+    if value not in valid:
+        raise ValueError(
+            "sampling must be 'extremes', 'random-active', or "
+            f"'quantile-stratified', got {sampling!r}")
+    return value
+
+
+def quantile_stratified_sample(indices: np.ndarray, values: np.ndarray, n: int,
+                               rng: np.random.Generator,
+                               *, max_strata: int = 5) -> np.ndarray:
+    """Sample approximately equally across activation-magnitude quantiles.
+
+    ``indices`` are global row indices and ``values`` is the aligned full feature
+    column. Each non-empty stratum contributes before any stratum contributes a
+    second row, so weak, medium, and strong activations are all represented.
+    """
+    indices = np.asarray(indices, dtype=int)
+    if n <= 0 or len(indices) == 0:
+        return np.array([], dtype=int)
+    if len(indices) <= n:
+        return indices.copy()
+    order = indices[np.argsort(np.abs(values[indices]), kind="stable")]
+    strata = [np.asarray(x, dtype=int) for x in np.array_split(
+        order, min(max_strata, n, len(order))) if len(x)]
+    strata = [rng.permutation(x).tolist() for x in strata]
+    out: list[int] = []
+    while len(out) < n and any(strata):
+        for stratum in strata:
+            if stratum and len(out) < n:
+                out.append(int(stratum.pop()))
+    return np.asarray(out, dtype=int)
+
+
 def name_verify_split(instruction_ids, verify_frac: float = 0.2):
     """Deterministic disjoint split: hash instruction_id, low buckets -> verify.
     Returns (name_mask, verify_mask), both (N,) bool, covering all rows."""
@@ -17,6 +68,16 @@ def name_verify_split(instruction_ids, verify_frac: float = 0.2):
         bucket = int(hashlib.sha1(str(iid).encode()).hexdigest(), 16) % 1000
         verify[i] = bucket < thresh
     return ~verify, verify
+
+
+def split_group_ids(battles) -> list[str]:
+    """Prompt-level groups used to keep repeated prompts in the same split."""
+    if "group_id" in battles.columns:
+        return battles["group_id"].astype(str).tolist()
+    if "prompt" in battles.columns:
+        return [hashlib.sha1(str(value).encode()).hexdigest()[:16]
+                for value in battles["prompt"]]
+    return battles["instruction_id"].astype(str).tolist()
 
 
 def top_pairs(z_col: np.ndarray, pool: np.ndarray, n_active: int, n_zero: int,
@@ -72,13 +133,11 @@ def holdout_buckets(z_col: np.ndarray, pool: np.ndarray, n_per_bucket: int,
     """Held-out pos/neg/tie buckets from ``pool``.
 
     ``extremes`` keeps the original top-|z| case-control protocol.
-    ``stratified-random`` samples uniformly within each sign bucket, covering the
-    activation range while retaining enough positive/negative/control cases.
+    ``random-active`` samples uniformly inside each sign bucket.
+    ``quantile-stratified`` covers weak through strong activation magnitudes.
+    The legacy name ``stratified-random`` is an alias for ``random-active``.
     """
-    if sampling not in ("extremes", "stratified-random"):
-        raise ValueError(
-            "sampling must be 'extremes' or 'stratified-random', "
-            f"got {sampling!r}")
+    sampling = normalize_verification_sampling(sampling)
     pool = np.asarray(pool)
     z_pool = z_col[pool]
     pos_pool = pool[z_pool > 0]
@@ -88,10 +147,12 @@ def holdout_buckets(z_col: np.ndarray, pool: np.ndarray, n_per_bucket: int,
     def choose(idx_pool):
         if len(idx_pool) == 0:
             return np.array([], dtype=int)
-        if sampling == "stratified-random":
+        if sampling == "random-active":
             if len(idx_pool) > n_per_bucket:
                 return rng.choice(idx_pool, size=n_per_bucket, replace=False)
             return idx_pool
+        if sampling == "quantile-stratified":
+            return quantile_stratified_sample(idx_pool, z_col, n_per_bucket, rng)
         return idx_pool[np.argsort(-np.abs(z_col[idx_pool]))][:n_per_bucket]
 
     pos = choose(pos_pool)
@@ -124,9 +185,10 @@ def _random_negatives(z_col, pool, n, *, active_idx=None, embeddings=None, rng=N
 def _similar_negatives(z_col, pool, n, *, active_idx=None, embeddings=None, rng=None):
     """Silent examples most cosine-similar to the top-activating exemplars.
 
-    Ranks silent candidates by mean cosine similarity to the ``active_idx`` rows'
-    embeddings (= cosine to the normalized active centroid). Deterministic stable
-    sort; returns min(n, n_silent).
+    Ranks a bounded sample of silent candidates by mean cosine similarity to the
+    ``active_idx`` rows' embeddings (= cosine to the normalized active centroid).
+    Only the indexed rows are materialized, in float32: a corpus-scale embedding
+    memmap must never be copied wholesale merely to choose a handful of controls.
     """
     if embeddings is None or active_idx is None or len(active_idx) == 0:
         raise ValueError("'similar' negatives need embeddings and a non-empty active_idx")
@@ -134,12 +196,30 @@ def _similar_negatives(z_col, pool, n, *, active_idx=None, embeddings=None, rng=
     silent = pool[z_col[pool] == 0]
     if len(silent) == 0:
         return silent
-    e = np.asarray(embeddings, dtype=np.float64)
-    e = e / (np.linalg.norm(e, axis=1, keepdims=True) + 1e-12)
-    centroid = e[np.asarray(active_idx, dtype=int)].mean(axis=0)
-    sims = e[silent] @ centroid                          # mean cosine to active set
+    if rng is None:
+        rng = np.random.default_rng(0)
+    candidates = silent
+    if len(candidates) > _SIMILAR_CANDIDATE_CAP:
+        candidates = rng.choice(
+            candidates, size=_SIMILAR_CANDIDATE_CAP, replace=False)
+
+    active_idx = np.asarray(active_idx, dtype=int)
+    candidates = np.asarray(candidates, dtype=int)
+    # np.memmap advanced indexing reads only these rows. Keep the fallback for small
+    # Python-list inputs used by third-party callers; real lens embeddings are ndarrays.
+    try:
+        active_e = np.asarray(embeddings[active_idx], dtype=np.float32)
+        candidate_e = np.asarray(embeddings[candidates], dtype=np.float32)
+    except (TypeError, IndexError):
+        e = np.asarray(embeddings, dtype=np.float32)
+        active_e, candidate_e = e[active_idx], e[candidates]
+    active_e = active_e / (np.linalg.norm(active_e, axis=1, keepdims=True) + 1e-12)
+    candidate_e = candidate_e / (
+        np.linalg.norm(candidate_e, axis=1, keepdims=True) + 1e-12)
+    centroid = active_e.mean(axis=0)
+    sims = candidate_e @ centroid                        # mean cosine to active set
     order = np.argsort(-sims, kind="stable")
-    return silent[order[:n]]
+    return candidates[order[:n]]
 
 
 def select_negatives(z_col, pool, n, *, strategy="random", active_idx=None,

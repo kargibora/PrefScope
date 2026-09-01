@@ -23,6 +23,8 @@ import pandas as pd
 # Fields an adapter must produce; also the fields battle_id is hashed over.
 CONTENT_COLS = ["prompt", "model_a", "model_b", "completion_a", "completion_b"]
 CORPUS_COLS = ["battle_id", "source", "language"] + CONTENT_COLS
+# Minimum for load_corpus; remaining corpus fields are synthesized when absent.
+LOAD_REQUIRED_COLS = ["prompt", "completion_a"]
 # Optional columns carried through when present (e.g. human preference labels).
 # y = P(A preferred): model_a wins -> 1.0, model_b -> 0.0, tie -> 0.5.
 OPTIONAL_COLS = ["human_pref"]
@@ -75,12 +77,37 @@ def write_corpus(df: pd.DataFrame, path) -> None:
     df[cols].to_parquet(path, index=False)
 
 
+def _synthesize_battle_ids(df: pd.DataFrame) -> list[str]:
+    """Content-hashed ids for a prepared table that has none.
+
+    Positional ``item_id``/``row_id`` are not used: they restart at zero per table
+    and would collide once tables are concatenated.
+    """
+    cols = [c for c in CONTENT_COLS if c in df.columns]
+    return [make_battle_id(r) for r in df[cols].to_dict("records")]
+
+
 def load_corpus(path) -> pd.DataFrame:
-    """Load a merged corpus and expose ``instruction_id`` so build-lens can use it."""
+    """Load a corpus or a ``prepare-dataset`` table; expose ids for build-lens.
+
+    Model columns are optional (single-response data has none) and ``completion_b``
+    marks a row as paired. Missing ``battle_id``, ``source``, and ``language`` are
+    synthesized.
+    """
     df = pd.read_parquet(path)
-    missing = [c for c in CORPUS_COLS if c not in df.columns]
+    missing = [c for c in LOAD_REQUIRED_COLS if c not in df.columns]
     if missing:
-        raise ValueError(f"{path}: not a corpus file (missing {missing})")
+        raise ValueError(
+            f"{path}: not a corpus or prepared dataset (missing {missing}). Build one "
+            "with `prefscope build-corpus` or `prefscope prepare-dataset`.")
     df = df.copy()
+    for col in ("source", "language"):
+        df[col] = df[col].astype("string").fillna("") if col in df.columns else ""
+    if "battle_id" not in df.columns:
+        df["battle_id"] = _synthesize_battle_ids(df)
     df["instruction_id"] = df["battle_id"]
+    df["group_id"] = [
+        hashlib.sha1(str(prompt).encode("utf-8")).hexdigest()[:16]
+        for prompt in df["prompt"]
+    ]
     return df

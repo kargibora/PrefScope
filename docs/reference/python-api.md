@@ -1,28 +1,247 @@
 # Python API Reference
 
-PrefScope is usable as a library. The core object is a **`Lens`** — a frozen SAE
-encoder + interpreted concept names + manifest. Its lifecycle is
+PrefScope is usable as a library. The core object is a **`Lens`**: a saved SAE encoder,
+a manifest, and optional concept annotations. Its lifecycle is
 `train → save → load → encode → analyze`.
 
 Top-level imports (`import prefscope`):
 
 ```python
 from prefscope import (
-    Lens, LoadedLens, load_lens,          # the lens object + loaders
+    Lens, LoadedLens, load_lens,          # local / Hugging Face lens loaders
     PairItem, Dataset,                    # data contracts
-    SAEConfig, TrainConfig,               # training configuration
+    ColumnMapping, TableDataset, HuggingFaceDataset, prepare_dataset,
+    AnalyzeConfig, run_analysis,          # complete frozen-lens workflow
+    SAEConfig, TrainConfig, SAELensProjector, SAELensTextBackend,
+    LensBackend, LensCapabilities,             # extensible lens backends
     diagnose, evaluate_preference, feature_preference_relevance,  # analyses
-    registry,                             # plug-in registry
+    normalize_outcomes, associate_outcomes, associate_outcomes_by_group,
+    NormalizedOutcomes, OutcomeAssociationResult,
+    RepresentationBatch, RepresentationSource, CallableRepresentationSource,
+    EmbeddingRepresentationSource, PrecomputedRepresentationSource,
+    FeatureBatch, FeatureMatrix, TableContract,
+    OutcomeSpec, AnalysisDataset, AnalysisArtifact, AnalysisComponent, AnalysisPlan,
+    DatasetAnalysisResult, FeatureArtifactDiagnostics, OutcomeAssociations,
+    PairedConceptShift, PairedOutcomeSpec, PairedOutcomeShifts,
+    PromptConditionedOutcomeShifts, PreferenceLengthConfounds, analyze_dataset,
+    preference_relevance, load_feature_batch, save_feature_batch,
+    concept_presence, paired_concept_shift, compare_encoded_responses,
+    registry, load_plugins,               # explicit plug-in activation
 )
 ```
+
+For new typed library code, `prefscope.api` is the canonical import surface. The
+same names remain available from top-level `prefscope` for convenience and compatibility.
+See [API stability](api-stability.md) for the supported layers.
 
 `import prefscope` is **torch-free**: the heavy `Embedder` / `SAEProjector` /
 `build_lens` imports happen lazily inside `Lens` methods, so importing the package
 never pulls in torch. `LoadedLens` is a back-compat alias for `Lens`.
 
-Sources of truth: `prefscope/api/loaded_lens.py`, `prefscope/api/config.py`,
-`prefscope/analysis/__init__.py`, `prefscope/encode/sae.py`,
-`prefscope/pipeline/run.py`.
+`TableDataset` and `HuggingFaceDataset` map arbitrary source columns into
+`PairItem`. `ColumnMapping` is the shared mapping, structured-message, and
+winner-label contract used by `prepare_dataset(...)` and the
+`prefscope prepare-dataset` CLI. `TableDataset(group_id=..., metadata=...)` preserves
+independent groups and caller columns in the resulting feature batch. Normalized labels always mean P(A preferred);
+winner tokens are declared explicitly rather than inferred.
+
+For the same high-level workflow as `prefscope analyze`:
+
+```python
+from prefscope import AnalyzeConfig, run_analysis
+
+config = AnalyzeConfig.load("analysis.yaml", overrides=["data.source.limit=1000"])
+outputs = run_analysis(config)             # resumes matching partial output
+```
+
+Sources of truth: the facades `prefscope/api/loaded_lens.py` and
+`prefscope/api/analysis.py`, their focused `_lens_*` and `analysis_*` implementation
+modules, `prefscope/api/config.py`, `prefscope/analysis/__init__.py`, and the documented
+pipeline runners.
+
+---
+
+## Interchangeable representations and typed analysis
+
+A vector source, lens policy, and projected feature view are separate contracts. The
+backend-neutral dataset operation is:
+
+```python
+features = lens.featurize(dataset)  # aligned FeatureBatch
+```
+
+Native embedding lenses use the existing fixed-width representation path internally.
+Direct backends, including SAELens and custom hosted systems, implement `LensBackend`.
+Both paths expose declared `LensCapabilities` and produce the same role-aware output.
+
+A vector source can still be controlled explicitly:
+
+```python
+from prefscope import EmbeddingRepresentationSource, Lens
+
+source = EmbeddingRepresentationSource(my_embedder)
+representations = source.encode(dataset)       # RepresentationBatch
+lens = Lens.load("lenses/completion")
+features = lens.project_representations(representations)  # FeatureBatch
+response_difference = features.matrix("z_diff")           # FeatureMatrix
+
+# The same typed contract loads an existing encode-dataset directory.
+encoded = load_feature_batch("analysis/codes", arrays=["z_diff"])
+```
+
+The built-in source accepts any duck-typed embedder with `encode_prompts` and
+`encode`. Custom sources implement `RepresentationSource` or use
+`CallableRepresentationSource`. Batches retain unique row IDs, aligned metadata,
+role, orientation, polarity, code semantics, and credential-free provenance. Metadata
+columns use one portable scalar type (string, boolean, or finite number) plus optional
+missing values. Saved schema-2 bundles preserve boolean semantic-presence arrays and
+float32 activity arrays without changing their dtype.
+The current source contract is fixed-width and item-level; pool residual activations in
+the source. Token/ragged activation batches are not yet part of this API.
+
+Run a task-centered outcome analysis without depending on pipeline internals:
+
+```python
+from prefscope import OutcomeSpec, analyze_dataset
+
+result = analyze_dataset(
+    {"response": features.matrix("z_a")},
+    {
+        "reward": OutcomeSpec(rewards, row_ids=features.row_ids, kind="continuous"),
+        "correct": OutcomeSpec(correct, row_ids=features.row_ids, kind="binary"),
+    },
+    group_ids=prompt_ids,                 # omit when feature metadata has prompt/group_id
+)
+associations = result.outcome_associations
+artifact = result.artifact("outcome_associations")
+manifest = result.to_manifest()         # portable summary; tables remain DataFrames
+print(artifact.estimand, artifact.metadata)
+```
+
+Built-in components attach a versioned `TableContract` to every artifact. The
+contract declares required columns, logical pandas types, a unique key, direction, and
+units. Construction validates the table without casting or reordering it. Custom
+components can omit a contract or provide their own:
+
+```python
+from prefscope import AnalysisArtifact, TableContract
+
+schema = TableContract(
+    schema_name="my_analysis",
+    schema_version=1,
+    required_columns=("feature_id", "estimate"),
+    dtypes={"feature_id": "integer", "estimate": "float"},
+    unique_key=("feature_id",),
+    orientation="as_declared",
+    units={"estimate": "unitless"},
+)
+artifact = AnalysisArtifact(
+    "my_analysis", table, "declared estimand", table_contract=schema)
+```
+
+The artifact manifest includes this schema. Result tables remain ordinary pandas
+DataFrames.
+
+The result distinguishes descriptive Pearson/OLS effects from its optional
+range-midpoint Fisher inference, identifies each BH correction family, and records
+whether rows or equal-weight independent groups define the estimand.
+
+For a custom reusable task:
+
+```python
+from prefscope import AnalysisArtifact, AnalysisComponent, AnalysisPlan
+
+class MyAnalysis(AnalysisComponent):
+    name = "my_analysis"
+    def run(self, dataset):
+        return AnalysisArtifact(
+            name=self.name,
+            table=my_table(dataset),
+            estimand="explicit description of the analysis unit and quantity",
+        )
+
+plan = AnalysisPlan.from_names(["outcome-associations"])
+# Or compose instances: AnalysisPlan((OutcomeAssociations(), MyAnalysis()))
+```
+
+Label-free checkpoint comparison requires calibrated semantic presence rather than raw
+nonzero codes:
+
+```python
+presence_a = FeatureMatrix.from_presence(
+    lens.presence(z_a), row_ids=features.row_ids, role="response_a")
+presence_b = FeatureMatrix.from_presence(
+    lens.presence(z_b), row_ids=features.row_ids, role="response_b")
+plan = AnalysisPlan((PairedConceptShift(side_a="before", side_b="after"),))
+result = analyze_dataset(
+    {"before": presence_a, "after": presence_b},
+    group_ids=prompt_ids,
+    plan=plan,
+)
+```
+
+This table explicitly reports `delta_b_minus_a`. It refuses raw positive-nonzero codes,
+so an exploratory activation fallback cannot silently become a semantic behavior claim.
+`FeatureMatrix.from_presence(...)` itself requires every feature to have a confirmed
+`semantic_threshold`; a mixed or positive-nonzero fallback fails closed.
+
+Compare aligned checkpoint or response-set outcomes on their raw scale without adding a
+project-specific script:
+
+```python
+paired_quality = PairedOutcomeSpec(
+    quality_before,
+    quality_after,
+    row_ids=features.row_ids,
+    kind="probability",
+    side_a="before",
+    side_b="after",
+    interpretation="higher values mean higher task quality",
+)
+plan = AnalysisPlan((
+    PairedOutcomeShifts(),
+    PromptConditionedOutcomeShifts(prompt_features="prompt_concepts"),
+))
+result = analyze_dataset(
+    {"prompt_concepts": prompt_presence},
+    paired_outcomes={"quality": paired_quality},
+    group_ids=prompt_group_ids,
+    plan=plan,
+)
+```
+
+The overall table estimates the equal-independent-group mean B-minus-A change. The
+prompt-conditioned table estimates a real heterogeneity contrast: B-minus-A change when
+the calibrated prompt concept is present minus the same change when it is absent. It does
+not infer heterogeneity by comparing two separate significance decisions. Binary,
+probability, and preference outcomes use bounded finite-sample inference after support
+gates. Unbounded continuous outcomes remain descriptive. Missingness is pairwise per
+outcome attribute. Generic and paired preference outcomes retain `0.5` ties as neutral values. The binary
+logistic preference table drops ties and says so. Its descriptive table retains them as
+neutral. Each table states direction, outcome scale, support, test, confidence interval,
+and its BH family. Prompt-conditioned BH adjustment covers every prompt-feature and
+outcome-attribute test within one paired outcome set. Paired outcome-only analysis does
+not need a dummy feature matrix.
+
+`FeatureArtifactDiagnostics` gives every aligned feature set a deterministic density,
+L0, zero-row, never-active/always-active, and value-range summary. It deliberately labels
+nonzero activity as numerical artifact health, not semantic presence.
+
+`PreferenceLengthConfounds` exposes the existing sensitivity screen through the same plan
+contract. It requires explicit `a_minus_b` orientation for both the response features and
+length difference plus a declared P(A preferred) outcome. Its result is an entanglement
+screen, not evidence that a concept is bad, biased, or causal.
+
+
+A complete Torch-free composition example is in
+[`examples/custom_analysis_api.py`](../../examples/custom_analysis_api.py). It injects a
+precomputed source, projects it through a duck-typed lens, composes built-in and custom
+analysis components, and compares paired outcomes without dataset-specific framework code.
+
+Registration is import-driven. Import a trusted module directly, call
+`load_plugins(["my_package.prefscope_plugin"])`, or list it under `plugins` in a `prefscope run` config. PrefScope does not scan installed packages automatically.
+
+See [Add a representation source](../extending/add-a-representation-source.md).
 
 ---
 
@@ -35,20 +254,70 @@ Wraps a built lens directory (SAE projector + embedder + optional
 
 ### Loading
 
-```python
-Lens.load(lens_dir, *, device: str = "cpu") -> Lens     # alias: Lens.from_dir
-load_lens(lens_dir, *, device: str = "cpu") -> Lens     # module-level shorthand
+```text
+Lens.load(lens_dir, *, device="cpu", annotations=None) -> Lens
+Lens.from_pretrained(repo_id, *, revision=None, subfolder=None, device="cpu") -> Lens
+Lens.from_saelens(release, sae_id, *, input_rep="individual", device="cpu") -> Lens
+Lens.from_config(path_or_mapping, *, device=None) -> Lens
+Lens.from_backend(backend) -> Lens
+lens.featurize(dataset, *, views=None, feature_ids=None, batch_size=None) -> FeatureBatch
+lens.project_saelens_tokens(*, row_ids, token_activations, token_row_ids,
+                            representation_contract, feature_ids=None) -> FeatureBatch
+load_lens("hf://owner/repository[/subfolder]", *, revision=None, device="cpu") -> Lens
 ```
 
 Builds the real torch `SAEProjector` + `Embedder` (embedder model id taken from
-the manifest's `embed_model_id`), loading `feature_names.csv` if present, and
-records the backing directory as `lens.lens_dir`. `Lens.from_dir` is kept as an
-alias of `Lens.load`. `load`, `load_lens`, and `TrainConfig` default to `"cpu"` so
-the simplest API path is safe on a laptop; opt into `"cuda"` or `"mps"` explicitly.
+the manifest's `embed_model_id`) and records the backing directory as
+`lens.lens_dir`. The loader merges bundled name, fidelity, calibration, context,
+and cluster tables by `feature_id`; `annotations=` can attach an external
+interpretation directory without first copying it. `from_pretrained` downloads
+an ordinary lens directory through the Hugging Face cache and then uses the same
+local loader. Mutable refs (including omitted `revision`) resolve to a 40-hex commit
+before download. The loaded object exposes `requested_revision` and `resolved_revision`;
+these runtime fields never mutate the published manifest or retain an access token.
+Offline loading of Hub artifacts requires an explicit commit SHA.
+
+`Lens.from_saelens(...)` is a separate experimental loader for a pretrained
+internal-activation SAE. It needs the optional `saelens` extra. `lens.featurize` loads
+one reader lazily and produces prompt, response-A, response-B, and derived A-minus-B
+views. The exact-activation method remains an advanced escape hatch. Both paths encode
+exact-hook tokens before max pooling and can retain selected features. They do not make
+the external release a pinned PrefScope lens artifact.
+See [Use a pretrained SAE through SAELens](../how-to/use-saelens.md).
+
+One repository may contain several lenses:
+
+```python
+completion = Lens.from_pretrained(
+    "owner/repository", subfolder="completion", revision="v1")
+prompt = Lens.from_pretrained(
+    "owner/repository", subfolder="prompt", revision="v1")
+```
+
+For the common one-prompt/one-response path, the convenience API loads both lenses,
+shares one embedder instance, and returns concept rows with presence provenance:
+
+```python
+from prefscope import extract_text_concepts
+
+result = extract_text_concepts(
+    "Explain why the sky is blue.",
+    "Shorter wavelengths scatter more strongly.",
+    repo_id="owner/repository",
+    device="cuda",
+    presence_policy="calibrated",
+)
+print(result["prompt"])
+print(result["completion"])
+```
+
+Pass `prompt_lens=` and `completion_lens=` for local directories or `hf://` sources.
+The default verified-only filter can be relaxed with `fidelity_only=False`; doing so
+makes the resulting names exploratory rather than verified.
 
 ### `encode` / `encode_one` — per-response codes
 
-```python
+```text
 lens.encode(prompts, completions=None) -> np.ndarray   # (N, M)
 lens.encode_one(prompt, completion=None) -> np.ndarray # (M,)
 ```
@@ -69,25 +338,74 @@ one = lens.encode_one("Write a poem", "Roses are red…")             # (M,)
 
 ### `concept_names` / `top_concepts` — naming
 
-```python
+```text
 lens.concept_names                          # pd.Series feature_id -> name, or None
 lens.top_concepts(codes, k=5) -> list[list[tuple[str, float]]]
 ```
 
 `concept_names` is `None` unless the lens carries a named `feature_names.csv`.
-`top_concepts` returns, per row, the `k` **named** features with the largest
-`|code|` as `(concept, signed_value)` pairs sorted by `|value|` descending;
-unnamed features are skipped.
+`top_concepts` returns, per row, up to `k` active **named** features with the largest
+`|code|` as `(concept, signed_value)` pairs. Unnamed/zero axes are skipped. For a signed
+lens it defaults to the positive pole because the name describes that pole; pass
+`matching_pole_only=False` only for deliberate axis-level inspection. The input must
+have exactly the lens's `m_total` feature columns; width mismatches are rejected before
+names are attached. Prefer `concept_activations` when you need explicit pole metadata.
 
 ```python
 codes = lens.encode(prompts, completions)
 for row in lens.top_concepts(codes, k=3):
-    print(row)   # e.g. [('verbosity', 2.1), ('refusal', -1.4), ('code blocks', 0.9)]
+    print(row)   # e.g. [('verbosity', 2.1), ('code blocks', 0.9)]
 ```
+
+### `feature_table` / `concept_activations` — filterable activations
+
+```text
+lens.feature_table
+lens.concept_activations(
+    codes,
+    row_ids=None,
+    active_only=True,
+    pole="any",                       # any | positive | negative
+    min_abs_activation=0.0,
+    top_k=None,                       # None = every active feature
+    fidelity_only=False,
+    semantic_presence_only=False,
+) -> pd.DataFrame
+```
+
+`concept_activations` returns one row for each retained item-feature pair. It keeps the
+feature ID, concept name, activation, rank, pole, semantic-presence status, and bundled
+annotations. A negative value on a signed lens points away from the stored positive-pole
+name, so the table marks it as not matching that name. Zero features are omitted by
+default because including them can create `N × M` rows.
+
+For calibrated concepts from a prompt lens:
+
+```python
+lens = Lens.from_dir("prompt-lens")
+if lens.input_rep != "prompt":
+    raise ValueError("This task needs a prompt lens")
+codes = lens.encode(prompts)
+concepts = lens.concept_activations(
+    codes, row_ids=row_ids, semantic_presence_only=True)
+```
+
+See [Extract concepts from every prompt](../how-to/extract-prompt-concepts.md) for a
+complete example.
+
+### `project_representations` — source-agnostic projection
+
+```text
+lens.project_representations(batch: RepresentationBatch) -> FeatureBatch
+```
+
+Requires `prompt` for a prompt lens or `response_a`/optional `response_b` for a
+response lens. It validates source width against the lens and returns named views with
+explicit orientation. A difference lens cannot project a single response.
 
 ### `encode_pairs` — paired contrast codes
 
-```python
+```text
 lens.encode_pairs(dataset, *, return_meta=True) -> (codes (N, M), meta)  # alias: project
 ```
 
@@ -101,7 +419,7 @@ the codes. It raises on single-response items or a token-granularity lens.
 
 ### `encode_items` — paired or single-response datasets
 
-```python
+```text
 lens.encode_items(dataset, *, return_meta=True) -> (codes, meta)
 ```
 
@@ -112,7 +430,7 @@ analyses below require the paired contrast form.
 
 ### Analyses on pair codes
 
-```python
+```text
 lens.diagnose(codes, meta, *, fidelity_only=False) -> pd.DataFrame
 lens.feature_preference_relevance(codes, meta) -> pd.DataFrame
 lens.evaluate_preference(codes, meta, **kwargs) -> dict
@@ -135,19 +453,54 @@ score = lens.evaluate_preference(codes, meta)   # {'accuracy': ..., 'auc': ..., 
 
 ### `save`
 
-```python
-lens.save(dest) -> Path
+```text
+lens.save(dest, *, overwrite=False, annotations=None, inference_only=False) -> Path
 ```
 
-Copies the backing lens directory to `dest` (recursive, `dirs_exist_ok`). Raises
-`ValueError` if the lens has no backing directory (constructed directly rather than
-loaded). No-op when `dest` equals the backing directory.
+Atomically copies the backing lens directory to `dest`; it refuses a non-empty
+destination unless `overwrite=True` and never merges with stale files. Pass an
+interpretation directory or a list of canonically named CSVs through `annotations=` to assemble one
+self-contained shareable lens:
+
+```python
+lens = Lens.load("lenses/completion_m2048", annotations="interpret/completion_m2048")
+lens.save(
+    "release/completion_m2048",
+    annotations="interpret/completion_m2048",
+    inference_only=True,                 # omit corpus-aligned z_*.npy and text
+)
+```
+
+The resulting directory can be uploaded as a Hugging Face model repository:
+
+```bash
+hf auth login
+hf upload owner/repository ./release/completion_m2048 .
+```
+
+The installed `prefscope package-lens` command is the recommended public workflow
+because it also validates the migrated manifest and can attach a model card. See
+[Publish a lens](../how-to/publish-a-lens.md).
+
+---
+
+## Synthetic quickstart data
+
+```python
+from prefscope import create_demo, make_demo_corpus
+
+frame = make_demo_corpus()           # deterministic 60-row DataFrame
+paths = create_demo("demo")          # corpus + matching quickstart.yaml
+```
+
+This is smoke-test data only; its concepts and statistical results are not research
+evidence.
 
 ---
 
 ## Training a lens — `Lens.train`
 
-```python
+```text
 Lens.train(data, config=TrainConfig(), *, out, columns=None) -> Lens
 ```
 
@@ -163,26 +516,32 @@ class SAEConfig:            # architecture — defines the frozen lens
     m: int = 128
     k: int = 16
     input_rep: str = "individual"     # "individual" | "difference" | "prompt"
-    matryoshka_prefix: tuple = (8,)
+    sae_type: str = "auto"             # individual/prompt -> batchtopk-relu
+    matryoshka_prefix: tuple = ()       # opt in to nested-width training
+    sparsity_coef: float = 1e-3         # JumpReLU
+    bandwidth: float = 1e-3             # JumpReLU STE
+    sparsity_warmup_steps: int = 0
 
 @dataclass
 class TrainConfig:          # run-time
     sae: SAEConfig = SAEConfig()
     embed_model_id: str | None = None # None -> embedder/config default
+    embed_model_revision: str | None = None # pin tag or commit for reproducibility
     val_frac: float = 0.1
     device: str = "cpu"
     max_train_rows: int | None = None
-    train_kwargs: dict = {}           # n_epochs/lr/sparsity_coef -> build_lens **train_kwargs
+    train_kwargs: dict = {}           # n_epochs/lr/etc. -> build_lens **train_kwargs
 ```
 
-`SAEConfig` is the part that defines what the lens *is* (width, sparsity, input
-representation). `TrainConfig` adds the run-time knobs and nests an `SAEConfig` in
-`sae`; entries in `train_kwargs` forward to `build_lens` (e.g. `n_epochs`, `lr`,
-`sparsity_coef`).
+`SAEConfig` is the part that defines what the lens *is* (width, sparsity,
+architecture, polarity, and input representation). `auto` resolves to signed
+BatchTopK for direct differences and non-negative BatchTopK for individual responses
+or prompts. `TrainConfig` adds run-time knobs; entries in `train_kwargs` forward to
+`build_lens` (for example `n_epochs` and `lr`).
 
 ### `pairs_to_battles` — data normalization
 
-```python
+```text
 pairs_to_battles(data, columns=None) -> pd.DataFrame
 ```
 
@@ -250,18 +609,43 @@ lens = Lens.train(df, TrainConfig(), out="lenses/from_df",
 
 ## Format-agnostic analyses — `prefscope.analysis`
 
-Operate on `(codes, meta)` or raw `z` matrices — independent of how the codes were
-produced. `codes` are signed self-minus-other SAE codes `(N, M)`; `meta` must
-carry a `pref` column = P(self preferred). `diagnose`, `evaluate_preference`, and
-`feature_preference_relevance` are re-exported at the top level (`prefscope`).
+Operate on `(codes, meta)` or raw `z` matrices, independent of how the codes were
+produced. Paired preference helpers use signed self-minus-other codes and require
+`pref = P(self preferred)`. Presence, region, and generic outcome helpers can instead use
+`z_a`, `z_prompt`, or other aligned feature matrices and do not require preference labels.
+`diagnose`, `evaluate_preference`, and `feature_preference_relevance` are re-exported at
+the top level (`prefscope`).
+
+Outcome normalization and association are also reusable directly:
+
+```python
+outcomes = normalize_outcomes(
+    ratings[["helpfulness", "correctness"]],
+    kind="multi_continuous", normalization="auto")
+result = associate_outcomes(codes, outcomes, group_ids=prompt_ids)
+long_table = result.table
+```
+
+`normalize_outcomes` validates binary `[0,1]`, bounded probability/preference, continuous,
+and multi-continuous contracts while preserving per-attribute missingness. `auto` keeps
+bounded scales natural and z-scores continuous scales. `associate_outcomes` returns
+Pearson descriptive associations. It reports p/q values only when both range-midpoint arms
+of the feature and outcome have at least five independent units; thin cells remain
+explicitly descriptive. Repeated groups are first reduced to per-group means and
+continuous normalization is recomputed across those means, giving every independent
+prompt equal weight; `associate_outcomes_by_group` is an explicit convenience wrapper for the same
+equal-group-weight analysis.
 
 Re-exported from `prefscope.analysis` (`__init__.py`):
 
 | function | returns | summary |
 |----------|---------|---------|
+| `normalize_outcomes(values, *, kind, names=None, normalization="auto")` | `NormalizedOutcomes` | validated 2-D values plus scale/missingness provenance |
+| `associate_outcomes(codes, outcomes, *, feature_ids=None, group_ids=None, min_units=3)` | `OutcomeAssociationResult` | long-form feature × outcome associations with explicit row/group estimand |
+| `associate_outcomes_by_group(codes, outcomes, group_ids, *, feature_ids=None, min_groups=3)` | `OutcomeAssociationResult` | explicit convenience wrapper for equal-group-weight associations |
 | `diagnose(codes, meta, *, names=None, fidelity_only=False)` | DataFrame | per-feature over/under-expression + outcome assoc, sorted by `net_direction` |
-| `feature_preference_relevance(codes, meta, *, names=None)` | DataFrame | per-feature univariate preference relevance |
-| `evaluate_preference(codes, meta, *, n_splits=5, seed=0, names=None)` | dict | CV logistic readout (accuracy/auc/top_features) |
+| `feature_preference_relevance(codes, meta, *, names=None, group_ids=None, group_col=None)` | DataFrame | per-feature univariate preference relevance |
+| `evaluate_preference(codes, meta, *, n_splits=5, seed=0, names=None, group_col=None)` | dict | CV logistic readout (accuracy/auc/top_features) |
 | `inside_outside_contrast(inside, outside)` | dict | Welch two-sample contrast (mean/delta/welch_t/welch_p/cohens_d) |
 | `dataset_reward(z)` | ndarray | per-feature reward summary over a dataset |
 | `split_half_stable(z, effect_fn, *, seed=0)` | DataFrame | split-half stability of a feature effect |
@@ -271,6 +655,7 @@ Re-exported from `prefscope.analysis` (`__init__.py`):
 | `symmetric_activity(z_a, z_b)` | ndarray | per-feature A/B activity symmetry |
 | `region_behavior_contrast(z, cluster_ids, *, seed=0)` | DataFrame | per-cluster region/behavior contrast |
 | `feature_confound_correlation(z, surrogate)` | DataFrame | per-feature correlation with a confound surrogate |
+| `screen_length_confound(z_diff, human_pref, length_difference, *, annotations=None, confound_threshold=0.3, collapse_fraction=0.5, permutations=0, seed=0, group_ids=None)` | `(DataFrame, dict)` | sensitivity screen for features whose preference association overlaps with response length; descriptive, not causal |
 | `auto_undesirable(z, surrogate, *, threshold=0.3)` | list | feature ids auto-flagged undesirable by surrogate correlation |
 
 ```python
@@ -291,6 +676,7 @@ Strategies (interpreters, verifiers, clusterers) register under a `kind`. List
 the names registered for a kind, then build one by name:
 
 ```python
+import prefscope.interpret.strategy  # activates built-in naming strategies
 from prefscope import registry
 
 registry.available("interpreter")            # -> list of registered names
@@ -304,7 +690,7 @@ obj = registry.make("interpreter", name, ...)  # construct by name (kwargs forwa
 ### `PipelineConfig`
 Typed, validated view of a pipeline config (see `config-schema.md`).
 
-```python
+```text
 PipelineConfig.from_dict(d: dict) -> PipelineConfig   # validate an in-memory mapping
 PipelineConfig.load(path) -> PipelineConfig           # load .yaml/.yml/.json then from_dict
 ```
@@ -315,7 +701,7 @@ Fields: `lens_dir`, `out_dir`, `stages`, `corpus`, `annotations`, `lens_kind`,
 key.
 
 ### `run_pipeline`
-```python
+```text
 run_pipeline(cfg: PipelineConfig, *, client=None, verbose: bool = True) -> dict
 ```
 Executes `cfg.stages` in canonical order, threading artifacts under `out_dir`.
@@ -335,12 +721,14 @@ print(outputs["win-relevance"])        # Path to win_relevance.csv under out_dir
 
 ## Raw SAE projection — `prefscope.encode.sae.SAEProjector`
 
-Frozen BatchTopK SAE projector. Accepts a path to `sae_model.pt` or the lens dir
+Frozen SAE projector. Accepts a path to `sae_model.pt` or the lens dir
 containing it; auto-applies the lens's `whiten.npz` if present.
 
-```python
+```text
 SAEProjector(model_path, device: str = "cpu")
-  .project(x: np.ndarray (N, D)) -> np.ndarray (N, M)     # sparse signed codes
+  .project(x: np.ndarray (N, D)) -> np.ndarray (N, M)     # sparse codes
+  .activation_polarity                                  # signed | nonnegative
+  .code_semantics                                       # axis | presence
   .reconstruct(z: np.ndarray (N, M)) -> np.ndarray (N, D) # back to embedding space
   .residual_norm(x: np.ndarray (N, D)) -> np.ndarray (N,) # ||x - recon|| per row
 ```
@@ -356,3 +744,23 @@ e = np.load("emb/e_a.npy").astype(np.float32)   # (N, D) embeddings
 z = proj.project(e)                              # (N, M) sparse codes
 resid = proj.residual_norm(e)                    # off-dictionary signal per row
 ```
+## Paired response comparison
+
+`compare_encoded_responses(...)` consumes an individual-lens encoded A/B bundle and
+returns a `ResponseComparison` containing overall shifts, prompt-conditioned shifts,
+scope classifications, and paired examples. `ResponseComparison.save(path)` writes the
+stable artifact contract used by the viewer.
+
+Lower-level, array-oriented analysis is available through:
+
+```python
+from prefscope import (
+    concept_presence,
+    paired_concept_shift,
+    paired_concept_shift_by_region,
+    summarize_response_scope,
+)
+```
+
+`Lens.presence(codes, policy="calibrated")` applies the annotations bundled with a loaded
+lens and returns feature-aligned boolean values plus threshold provenance.

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from prefscope.encode.cache import NpyCache
 from prefscope.encode.embed import Embedder
@@ -58,10 +59,12 @@ def test_encode_uncached_preserves_input_order_despite_length_sorting(monkeypatc
             h = torch.zeros(b, 1, 4)
             for r in range(b):
                 h[r, 0, int(ids[r, 0]) % 4] = 1.0     # one-hot identity = ord%4
-            out = FakeOut(); out.last_hidden_state = h
+            out = FakeOut()
+            out.last_hidden_state = h
             return out
 
-    emb._tok = FakeTok(); emb._model = FakeModel()
+    emb._tok = FakeTok()
+    emb._model = FakeModel()
     monkeypatch.setattr(emb, "_ensure_model", lambda: None)
 
     # input NOT in length order: lengths 4,1,3,2  -> sorted internally, must come back in order
@@ -80,6 +83,41 @@ def test_unload_clears_model():
     emb._tok = object()
     emb.unload()
     assert emb._model is None and emb._tok is None
+
+
+def test_hf_embedder_uses_fp16_for_mps(monkeypatch):
+    import sys
+    import torch
+
+    captured = {}
+
+    class FakeTokenizer:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            return cls()
+
+    class FakeModel:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            captured.update(kwargs)
+            return cls()
+
+        def to(self, device):
+            captured["device"] = device
+            return self
+
+        def eval(self):
+            return self
+
+    fake_transformers = type("FakeTransformers", (), {
+        "AutoModel": FakeModel, "AutoTokenizer": FakeTokenizer,
+    })
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    Embedder(cache=None, device="mps")._ensure_model()
+
+    assert captured["torch_dtype"] == torch.float16
+    assert captured["device"] == "mps"
 
 
 def test_format_query_wimhf_template():
@@ -179,3 +217,12 @@ def test_encode_uncached_pools_last_real_token_when_left_padded(monkeypatch):
     # (the buggy formula would pool column 1 for the first row -> [0,1,0,0])
     assert out.shape == (2, 4)
     np.testing.assert_allclose(out, [[0, 0, 1, 0], [0, 0, 1, 0]], atol=1e-6)
+
+
+def test_encode_rejects_misaligned_prompt_and_completion_lists(monkeypatch):
+    emb = Embedder(cache=None)
+    monkeypatch.setattr(
+        emb, "encode_queries", lambda queries: np.zeros((len(queries), 2), np.float32))
+
+    with pytest.raises(ValueError, match="same length; got 2 and 1"):
+        emb.encode(["first", "second"], ["only one"])

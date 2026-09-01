@@ -12,7 +12,11 @@ from prefscope.interpret.strategy import (
 
 
 class FakeClient:
+    def __init__(self):
+        self.messages = []
+
     def raw(self, messages, **kw):
+        self.messages.extend(messages)
         return '- "uses code blocks"'
 
 
@@ -59,6 +63,7 @@ def test_resolve_name_mode_uses_input_rep_not_file_probing():
 def test_resolve_name_mode_prompt_lens_wins():
     assert resolve_name_mode("auto", "prompt", "prompt") == "single-text"
     assert resolve_name_mode("pairwise", "individual", "prompt") == "single-text"
+    assert resolve_name_mode("custom-prompt", "prompt", "prompt") == "custom-prompt"
 
 
 def test_single_text_strategy_registered_and_guards_prompt_codes():
@@ -69,10 +74,41 @@ def test_single_text_strategy_registered_and_guards_prompt_codes():
         SingleTextNameStrategy().name(codes, FakeClient())
 
 
+def test_signed_prompt_negative_pole_names_negative_examples():
+    z = np.zeros((60, 1), dtype=np.float32)
+    z[:5, 0] = [5, 4, 3, 2, 1]
+    z[5:10, 0] = [-5, -4, -3, -2, -1]
+    prompts = [f"positive {i}" if i < 5 else f"negative {i}" for i in range(60)]
+    codes = LensCodes(
+        "d", "prompt", _battles(), None, None, None, lens_kind="prompt",
+        z_prompt=z, prompts=prompts, instruction_ids=[str(i) for i in range(60)],
+        activation_polarity="signed", code_semantics="axis",
+    )
+    client = FakeClient()
+    result = SingleTextNameStrategy(
+        pole="negative", n_active=5, n_zero=5, verify_frac=0
+    ).name(codes, client)
+    naming_prompt = client.messages[1]["content"]
+    assert "negative 5" in naming_prompt and "positive 0" not in naming_prompt
+    assert result.loc[0, "pole"] == "negative"
+    assert result.loc[0, "fire_rate"] == 5 / 60
+
+
 def test_individual_strategy_requires_z_a():
     codes = LensCodes("d", "individual", _battles(), _z(), z_a=None, z_b=None)
     with pytest.raises(ValueError, match="needs z_a"):
         IndividualNameStrategy().name(codes, FakeClient())
+
+
+def test_signed_individual_naming_requires_explicit_positive_pole():
+    codes = LensCodes("d", "individual", _battles(), _z(),
+                      z_a=_z(seed=1), z_b=_z(seed=2),
+                      activation_polarity="signed", code_semantics="axis")
+    with pytest.raises(ValueError, match="positive"):
+        IndividualNameStrategy().name(codes, FakeClient())
+    df = IndividualNameStrategy(pole="positive", n_active=5, n_zero=5).name(
+        codes, FakeClient())
+    assert len(df) == 3
 
 
 def test_end_to_end_dispatch_pairwise():
@@ -118,11 +154,20 @@ def test_resolve_verify_mode():
     assert resolve_verify_mode("auto", "difference", "completion") == "pairwise"
     assert resolve_verify_mode("auto", "difference", "prompt") == "prompt"   # lens-kind wins
     assert resolve_verify_mode("pairwise", "individual", "completion") == "pairwise"
+    assert resolve_verify_mode("custom-prompt", "prompt", "prompt") == "custom-prompt"
 
 
 def test_individual_verify_requires_z_a():
     with pytest.raises(ValueError, match="needs z_a"):
         IndividualVerifyStrategy().verify(_vcodes(z_a=None, z_b=None), pd.DataFrame(), object())
+
+
+def test_signed_individual_verify_requires_explicit_positive_pole():
+    codes = _vcodes(input_rep="individual", z_a=_z(seed=1), z_b=_z(seed=2),
+                    activation_polarity="signed", code_semantics="axis")
+    with pytest.raises(ValueError, match="positive"):
+        IndividualVerifyStrategy().verify(
+            codes, pd.DataFrame({"feature_id": [0]}), object())
 
 
 def test_prompt_verify_requires_prompt_codes():
@@ -171,6 +216,7 @@ def test_individual_verify_random_negatives_passes_no_embeddings(monkeypatch):
 
     def spy(texts, z, names, client, **kw):
         seen.update(kw)
+        seen["codes"] = z
         return pd.DataFrame({"fidelity_pass": [True]})
 
     monkeypatch.setattr("prefscope.interpret.verify.verify_single_text_features", spy)
@@ -178,6 +224,26 @@ def test_individual_verify_random_negatives_passes_no_embeddings(monkeypatch):
     registry.make("verifier", "individual").verify(  # default negatives="random"
         codes, pd.DataFrame({"feature_id": [0]}), object())
     assert seen["negatives"] == "random" and seen["embeddings"] is None
+    assert isinstance(seen["codes"], tuple)
+
+
+def test_prompt_verify_close_uses_aligned_code_space_not_raw_embeddings(monkeypatch):
+    """Raw (N, 4096) prompt embeddings caused a multi-GiB allocation per feature.
+    Hard controls should match on the prompt lens's other learned concepts instead."""
+    seen = {}
+
+    def spy(texts, z, names, client, **kw):
+        seen.update(kw)
+        seen["codes"] = z
+        return pd.DataFrame({"fidelity_pass": [True]})
+
+    monkeypatch.setattr("prefscope.interpret.verify.verify_single_text_features", spy)
+    codes = _vcodes(z_prompt=_z(seed=3), prompts=[f"p{i}" for i in range(60)])
+    PromptVerifyStrategy(negatives="close", embeddings="does-not-need-to-exist.npy").verify(
+        codes, pd.DataFrame({"feature_id": [0]}), object())
+    assert seen["negatives"] == "close"
+    assert seen["embeddings"] is codes.z_prompt
+    assert seen["codes"] is codes.z_prompt
 
 
 def test_individual_verify_single_response_alignment(monkeypatch):

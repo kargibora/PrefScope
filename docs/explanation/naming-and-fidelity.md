@@ -1,66 +1,93 @@
 # Naming and fidelity
 
-A raw lens axis is a direction, not an explanation. To read it you **name** it, then
-**verify** the name holds up. PrefScope keeps these as two distinct stages with a
-deliberate gap between them: naming is hypothesis generation; verification is
-falsification on held-out data. This page explains the split, the gate, and the
-caveat — de-pinned from any specific LLM (any OpenAI-compatible backend works, hosted
-or local).
+A raw lens feature is a numerical direction, not an explanation. Naming proposes a
+label for it. Verification checks that label on separate examples. PrefScope keeps these
+as two different steps. This page explains both steps. The process works with any
+supported LLM endpoint, hosted or local.
 
 ## Scope: what a passing name is (and is not)
 
-A verified name is a **verified hypothesis**, not ground truth. Concretely, a `fidelity_pass`
-means: on a held-out, deliberately **case-control** sample (top activators vs silent
-controls), an independent LLM's presence judgments correlate positively and significantly
-with the axis firing. With the default sampler, that is *correlational detection fidelity
-at the extremes*; the stratified-random mode covers the wider activation range. It does
-**not** establish that:
+A passing name is still a checked proposal, not ground truth. `fidelity_pass=True`
+means that the name worked on separate high-activation examples and did not also fit the
+silent controls. The default check focuses on the strongest activations. The optional
+`quantile-stratified` mode checks a wider activation range. A passing result does **not** establish that:
 
-- the name is the axis's complete or ground-truth meaning (naming reads only the positive
-  pole; the negative pole of a signed axis is a separate, un-named concept);
-- the feature is fully monosemantic, or detects *every* occurrence of the behaviour
-  (the default top-only sample biases toward specificity over sensitivity; feature
-  absorption can also hide true instances);
-- the reported precision/agreement reflects **corpus prevalence** — it is measured on the
-  balanced selected sample, not the population;
-- the feature *causes* anything in the generating model. The SAE runs on **output
-  embeddings**, so this is post-training data/representation analysis, not mechanistic
-  interpretation of the model.
+- the name is the complete meaning of the feature;
+- the feature describes only one idea or detects every occurrence of that idea;
+- precision on the selected examples equals prevalence or precision in the full corpus;
+- the feature caused anything inside the model that produced the text.
+
+A signed feature can also have a different meaning on its negative pole. The stored name
+usually describes only the positive pole.
 
 Treat names as auditable leads, and read the examples yourself before making a claim.
 For stronger reporting, the config can generate several independently sampled naming
 proposals and synthesize them (`n_candidates`), then verify over a larger
-`stratified-random` held-out sample (`n_examples`). This reduces dependence on one
+`quantile-stratified` held-out sample (`n_examples`). This reduces dependence on one
 extreme evidence view, but it does not turn an observational output-space feature into
 a causal or mechanistic claim.
 
+New individual and prompt lenses default to non-negative `batchtopk-relu`, so their
+positive-versus-zero evidence has presence semantics. Historical individual/prompt
+`batchtopk` lenses are signed axes. PrefScope refuses to run their single-text namer or
+verifier unless you pass `--pole positive` (pipeline config: `pole: positive`). This is
+an explicit acknowledgement that the result labels only the positive pole; it does not
+change or repair the old lens. Direct difference lenses remain signed and use the
+pairwise positive/opposite-pole verifier.
+
 ## The split: name on one pool, verify on a disjoint one
 
-Battles are split once — deterministically, by hashing the instruction id — into a
+Battles are split once — deterministically, by hashing a prompt-level group id — into a
 **name pool** (≈80%) and a disjoint **verify pool** (≈20%). Naming never touches the
 verify pool, so verification is a genuine held-out check, not a re-test of the same
 examples.
 
 ## Naming (hypothesis generation)
 
-For each feature `f`, within the name pool, take the battles where the axis fires
-hardest (its positive pole) plus some random *silent* battles (`z_f = 0`). Show an LLM
-each example's prompt, response A, response B, and the signed activation `z_f`, and
-ask for a short concept phrase `c_f` describing what distinguishes the
-high-activation responses:
+For each feature, PrefScope selects strong activations and silent controls from the name
+pool. What the LLM sees depends on the lens:
 
-$$
-c_f = \mathrm{LLM}_{\text{name}}\big(\{(\text{prompt}_i, A_i, B_i, z_{i,f})\}\big).
-$$
+- A direct difference lens shows the prompt, response A, response B, and signed contrast.
+- An individual lens shows one response and its prompt.
+- A prompt lens shows the prompt text alone.
 
-These names are **unverified hypotheses**. With `n_candidates > 1`, PrefScope samples
+The LLM then proposes a short phrase for the positive feature direction. The exact
+sampling method is recorded with the output.
+
+These names are **unverified hypotheses**. The CSV's `confidence` is the namer's
+self-reported confidence, not a calibrated probability or statistical interval. With
+`n_candidates > 1`, PrefScope samples
 several views from the strong-activation pool, generates independent proposals, and asks
 for one atomic synthesis; `candidate_concepts` retains every proposal for audit. A name
 that sounds plausible may still not track the axis — that is what the next stage checks.
 
+### Individual-response proposal review
+
+For an individual lens, responses remain ranked by positive feature activation, but the
+sampler first collapses A/B by instruction and keeps the stronger completion. Thus three
+displayed activators represent three distinct prompts rather than two answers to one prompt
+plus a third example. Silent controls also use distinct, non-active instructions.
+
+The proposal returns one boolean support judgment per example. A second LLM call then acts
+as a reviewer: it may retain the candidate or rewrite an overly narrow, broad, compound, or
+prompt-topic-based phrase into one atomic response property. The reviewer evaluates the
+final wording against the same naming examples. Because these are not independent data,
+their support vectors are diagnostics and a cost-saving triage screen, not verification.
+PrefScope forwards a candidate only when a strict majority of displayed activators match it
+and its active match rate exceeds its control match rate. It does **not** require unanimity.
+
+The name CSV records `reviewed_concept`, `naming_active_support`,
+`naming_active_total`, `naming_control_violations`, `naming_control_total`,
+`naming_screen_pass`, and `naming_review_action`. The legacy `naming_audit_*` columns remain
+as exact-separation diagnostics for compatibility, but no longer define the primary gate.
+Raw proposals remain in `candidate_concepts`, and `--debug-responses` writes proposal and
+`*_review.txt` responses. For multiple evidence views, the synthesized final concept is
+reviewed over their instruction-deduplicated union. The exact reviewed wording is frozen
+before held-out verification; it is never revised after observing verification outcomes.
+
 ## Verification (the falsification gate)
 
-A name is trustworthy only if an **independent** LLM, shown a response pair and *just
+A name passes the automated gate only if an LLM, shown a response pair and *just
 the concept name* (not the activation), agrees with the SAE about which side expresses
 it. This runs on the held-out verify pool.
 
@@ -76,13 +103,22 @@ The **opposite-pole** design is what makes the pairwise test a real falsificatio
 the `neg` bucket presents pairs where the *opposite* side should express the concept, so
 a name that merely sounds right but does not track the axis gets caught. For individual
 responses, `negatives: close` instead chooses silent controls that resemble activators in
-the other SAE features.
+the other SAE features. Individual verification also permits only one response per
+instruction and excludes active instructions from its control bucket, so correlated A/B
+answers do not count as independent observations. This held-out test is distinct from the
+same-evidence naming review above.
 
 The default `sampling: extremes` tests detection at the poles. For broader held-out
-coverage, `sampling: stratified-random` samples uniformly inside the positive, negative,
-and silent buckets; `n_examples: 300` divides a total 300-judgment budget across them.
+coverage, `sampling: quantile-stratified` covers weak through strong activations within
+the positive, negative, and silent buckets; `n_examples: 300` divides a total
+300-judgment budget across them.
 For an individual or prompt feature, the same setting splits the budget between positive
 activations and silent controls.
+
+The naming and verification clients use the same model by default, although their data
+splits and prompts differ. Configure a distinct verifier model when cross-model review is
+important; either way, automated verification remains model judgment rather than human
+ground truth.
 
 ### The fidelity correlation and the gate
 
@@ -128,7 +164,11 @@ fidelity-passing axes, so the falsification gate is what keeps the final concept
 honest. For the flags that tune naming and verification, see the
 [CLI reference](../reference/cli.md).
 
-To swap the naming or verification strategy (they are registered `Interpreter` /
-`Verifier` components), see `docs/extending/add-a-verifier.md`. For the exact flags
-(`--n-active`, `--n-per-bucket`, `--abbreviate`, `--model` / `--api-base`), see the
-build-and-analyze how-to.
+`fidelity_pass` validates a name on the verifier's sampled distribution; it does **not**
+make every nonzero SAE code a semantic occurrence. For corpus-level prevalence and model
+behavior reports, continue with [semantic presence and context](presence-and-context.md).
+
+To change the naming or verification strategy, see
+[Add an interpreter](../extending/add-an-interpreter.md) and
+[Add a verifier](../extending/add-a-verifier.md). For exact flags, see the
+[CLI reference](../reference/cli.md).

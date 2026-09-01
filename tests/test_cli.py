@@ -86,7 +86,7 @@ def test_build_lens_input_rep_individual_flows_through(tmp_path, monkeypatch):
     assert captured["input_rep"] == "individual"
 
 
-def test_build_lens_matryoshka_prefix_defaults_to_8(tmp_path, monkeypatch):
+def test_build_lens_matryoshka_is_off_by_default(tmp_path, monkeypatch):
     path = _write_annotations(tmp_path)
     captured = {}
 
@@ -98,4 +98,19 @@ def test_build_lens_matryoshka_prefix_defaults_to_8(tmp_path, monkeypatch):
     rc = cli.main(["build-lens", "--annotations", str(path),
                    "--out", str(tmp_path / "lens"), "--device", "cpu"])
     assert rc == 0
-    assert captured["matryoshka_prefix"] == (8,)
+    assert captured["matryoshka_prefix"] == ()
+
+
+def test_build_lens_sae_type_defaults_to_auto(tmp_path, monkeypatch):
+    path = _write_annotations(tmp_path)
+    captured = {}
+
+    def fake_build_lens(battles, embedder, out_dir, **kw):
+        captured.update(kw)
+        return {"n_battles": len(battles)}
+
+    monkeypatch.setattr("prefscope.pipeline.build_lens.build_lens", fake_build_lens)
+    assert cli.main(["build-lens", "--annotations", str(path), "--out",
+                     str(tmp_path / "lens"), "--device", "cpu"]) == 0
+    assert captured["sae_type"] == "auto"
+    assert captured["sparsity_warmup_steps"] == 0

@@ -8,7 +8,7 @@ Follow these steps:
     4. If the CONCEPT is present in both responses but is obviously more present in one response than the other, output "A" or "B" based on which response it is *more* present in.
 
 Additional instructions:
-    - The conversation proceeding the final responses is provided as context (and early turns may be truncated), but your annotation should focus only on the final responses.
+    - The conversation preceding the final responses is provided as context (and early turns may be truncated), but your annotation should focus only on the final responses.
     - Do not focus on which response is better. Only focus on the extent to which the CONCEPT is present in each response.
     - Make sure to only output "A" or "B" if they clearly differ in how much the CONCEPT is present.
     - Output "Tie" when both responses express the concept equally, or neither does.

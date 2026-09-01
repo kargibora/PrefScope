@@ -34,7 +34,7 @@ def evaluate_preference(codes, meta, *, n_splits: int = 5, seed: int = 0,
     if "pref" not in meta.columns:
         raise ValueError("meta must have a 'pref' column (P(A preferred) per row)")
     pref = np.asarray(meta["pref"], dtype=float)
-    keep = pref != 0.5
+    keep = np.isfinite(pref) & (pref != 0.5)
     X, y = codes[keep], (pref[keep] > 0.5).astype(int)
     if len(np.unique(y)) < 2:
         raise ValueError(

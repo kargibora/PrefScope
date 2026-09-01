@@ -14,9 +14,10 @@ uv sync --extra cpu --extra cluster --group dev
 .venv/bin/python -m pytest -m "not slow" -q
 ```
 
-Use one accelerator extra at a time: `cpu`, `cu121`, or `rocm`. The tests use the CPU
-extra. Tests marked `slow` require a large local model or a live service and are not
-part of the default contribution loop.
+The default test loop uses the `cpu` extra. GPU setup depends on the platform; install
+the appropriate PyTorch build from the official PyTorch index before installing the
+`torch` extra. Tests marked `slow` require a large local model or a live service and are
+not part of the default contribution loop.
 
 ## Making a change
 
@@ -30,6 +31,18 @@ part of the default contribution loop.
 Registered components should have a stable kebab-case name, validate unknown options,
 and document their required inputs. Start with
 [`docs/extending/the-registry.md`](docs/extending/the-registry.md).
+
+## Documentation style
+
+Write for a reader who is new to the project.
+
+- Start with what the user can do. Explain internal design afterward.
+- Use short sentences and common words.
+- Define a technical term the first time it appears. Keep exact API names unchanged.
+- Put one main action in each numbered step.
+- Separate a plain explanation from exact statistical or schema details.
+- Do not call raw feature activity semantic presence.
+- Test every command example and use links instead of vague file paths.
 
 ## Pull requests
 

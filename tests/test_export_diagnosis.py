@@ -2,21 +2,16 @@
 
 Synthetic bank with a planted prompt→response signal; no GPU / embeddings.
 """
-import sys
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-sys.path.insert(0, str(ROOT))
-from export_viewer_data import (  # noqa: E402
+from prefscope.viewer_export import (
     export_conditional,
     export_diagnosis,
+    export_joint_examples,
     export_report_battles,
 )
-from prefscope.pipeline.oriented_bank import build_oriented_codes, save_bank  # noqa: E402
+from prefscope.pipeline.oriented_bank import build_oriented_codes, save_bank
 
 
 class _Id:
@@ -191,10 +186,54 @@ def test_export_report_battles_does_not_label_all_negative_prompt(tmp_path):
     assert export_report_battles(tmp_path, str(corpus), str(plens), diag, pnames) is None
 
 
+def test_export_joint_examples_requires_both_axes_and_aligns_battle_ids(tmp_path, monkeypatch):
+    """Joint evidence is ranked by both activations, excludes the wrong poles, and
+    never emits both answers from one battle merely because both sides fire."""
+    import prefscope.interpret.io as io
+
+    lens = tmp_path / "lens"
+    lens.mkdir()
+    # b0 has two positive answers; only its stronger B side may survive the per-battle
+    # deduplication. b1 has an enormous response activation but a barely-active prompt;
+    # balanced joint ranking should still put b0 first. b2 is the wrong prompt pole.
+    np.save(lens / "z_a.npy", np.array([[4.0], [0.0], [100.0]], np.float32))
+    np.save(lens / "z_b.npy", np.array([[5.0], [100.0], [0.0]], np.float32))
+    pd.DataFrame({"battle_id": ["b0", "b1", "b2"]}).to_parquet(
+        lens / "battles.parquet")
+
+    plens = tmp_path / "plens"
+    plens.mkdir()
+    # Deliberately shuffled relative to the completion lens: z rows are b1,b0,b2.
+    np.save(plens / "z_prompt.npy", np.array([[0.01], [10.0], [-3.0]], np.float32))
+    pd.DataFrame({"battle_id": ["b1", "b0", "b2"]}).to_parquet(
+        plens / "battles.parquet")
+
+    battles = pd.DataFrame({
+        "prompt": ["p0", "p1", "p2"],
+        "completion_a": ["a0", "a1", "a2"],
+        "completion_b": ["b0 answer", "b1 answer", "b2 answer"],
+        "model_a": ["A"] * 3,
+        "model_b": ["B"] * 3,
+        "human_pref": [1.0, 0.0, 1.0],
+    })
+    monkeypatch.setattr(io, "load_lens_battles",
+                        lambda lens_dir, corpus=None: (battles, np.zeros((3, 1)), {}))
+
+    out = export_joint_examples(lens, "corpus.parquet", plens, [(0, 0)], per_pair=2)
+    rows = out["0"]["examples"]["0"]
+    assert [r["prompt"] for r in rows] == ["p0", "p1"]
+    assert rows[0]["side"] == "b" and rows[0]["response"] == "b0 answer"
+    assert rows[0]["prompt_activation"] == 10.0
+    assert rows[0]["response_activation"] == 5.0
+    assert rows[0]["outcome"] == "loss"
+    assert rows[1]["outcome"] == "win"
+    assert all(r["prompt_activation"] > 0 and r["response_activation"] > 0 for r in rows)
+
+
 # --- unnamed concepts emit null, never the string "nan" (A1) ---
 
 def test_export_elicitation_emits_null_for_unnamed(tmp_path):
-    from export_viewer_data import export_elicitation
+    from prefscope.viewer_export import export_elicitation
     csv = tmp_path / "elic.csv"
     pd.DataFrame({
         "prompt_feature": [0, 0],
@@ -215,7 +254,7 @@ def test_export_elicitation_keeps_each_features_top_edges(tmp_path):
     other features' stronger edges) must still be kept, so the Feature panel's 'activated
     by' isn't empty for it (the old global top-N by |lift| dropped exactly these)."""
     import numpy as np
-    from export_viewer_data import export_elicitation
+    from prefscope.viewer_export import export_elicitation
     rows = []
     for px in range(60):  # 60 very strong edges for feature 1 would dominate a global top-N
         rows.append({"prompt_feature": px, "completion_feature": 1, "lift": 6.0, "significant": False})
@@ -247,7 +286,7 @@ def test_export_conditional_emits_null_for_unnamed_feature(tmp_path):
 def test_feature_fire_rate_from_per_side_codes(tmp_path):
     """generality = fraction of responses (both sides) where a feature's top-k code != 0."""
     import numpy as np
-    from export_viewer_data import feature_fire_rate
+    from prefscope.viewer_export import feature_fire_rate
     lens = tmp_path / "lens"
     lens.mkdir()
     # 2 battles, 2 features. feature 0 fires: A[b0], B[b0], B[b1] -> 3 of 4 responses = 0.75
@@ -259,10 +298,23 @@ def test_feature_fire_rate_from_per_side_codes(tmp_path):
     assert fr[1] == 0.0
 
 
+def test_feature_fire_rate_uses_semantic_threshold_when_calibrated(tmp_path):
+    from prefscope.viewer_export import feature_fire_rate
+    lens = tmp_path / "lens"
+    lens.mkdir()
+    np.save(lens / "z_a.npy", np.array([[0.5], [3.0]], dtype=np.float32))
+    np.save(lens / "z_b.npy", np.array([[1.5], [4.0]], dtype=np.float32))
+    features = pd.DataFrame({
+        "feature_id": [0], "semantic_threshold": [2.0], "presence_pass": [True],
+    })
+    # Historical z>0 would report 4/4. Semantic presence is only 2/4.
+    assert feature_fire_rate(lens, features)[0] == 0.5
+
+
 def test_feature_fire_rate_needs_per_side_codes(tmp_path):
     """A difference lens has only z_diff (no per-side firing) -> {} (generality absent)."""
     import numpy as np
-    from export_viewer_data import feature_fire_rate
+    from prefscope.viewer_export import feature_fire_rate
     lens = tmp_path / "lens"
     lens.mkdir()
     np.save(lens / "z_diff.npy", np.zeros((2, 2), dtype=np.float32))
@@ -271,7 +323,7 @@ def test_feature_fire_rate_needs_per_side_codes(tmp_path):
 
 def test_feature_prompt_types_counts_significant_elicitors(tmp_path):
     """n_prompt_types = # prompt concepts that significantly (lift>1) elicit the feature."""
-    from export_viewer_data import feature_prompt_types
+    from prefscope.viewer_export import feature_prompt_types
     csv = tmp_path / "elic.csv"
     pd.DataFrame({
         "prompt_feature":     [0, 1, 2,  0, 1, 2],
@@ -290,7 +342,7 @@ def test_dumps_emits_valid_json_for_nan_inf(tmp_path):
     the browser's JSON.parse). String content 'NaN' must be preserved."""
     import json
     import math
-    from export_viewer_data import _dumps
+    from prefscope.viewer_export import _dumps
     import numpy as np
     s = _dumps({"a": float("nan"), "b": math.inf, "c": -math.inf, "d": 1.5,
                 "e": ["x", float("nan"), 2], "text": "value is NaN",
@@ -310,7 +362,7 @@ def test_export_examples_by_model(tmp_path, monkeypatch):
     """Each (model, feature) gets that model's own top-activating answers, from the correct
     side (z_a for model_a, z_b for model_b), with outcome from the model's perspective."""
     import numpy as np
-    import export_viewer_data as ev
+    import prefscope.viewer_export as ev
     from prefscope import interpret as _interpret  # noqa: F401
     import prefscope.interpret.io as io
 
@@ -339,7 +391,7 @@ def test_export_examples_by_model(tmp_path, monkeypatch):
 
 
 def test_export_examples_by_model_needs_per_side_codes(tmp_path):
-    import export_viewer_data as ev
+    import prefscope.viewer_export as ev
     features = pd.DataFrame({"feature_id": [0], "fidelity_pass": [True]})
     diag = {"models": ["A", "B"], "features": [0], "concepts": ["c"]}
     assert ev.export_examples_by_model(tmp_path, "corpus.parquet", features, diag) is None
@@ -350,7 +402,7 @@ def test_export_examples_by_model_surfaces_concept_pole_not_magnitude(tmp_path, 
     OPPOSITE pole (a different concept), so it must NOT be surfaced under 'answers exhibiting
     <concept>'. Selection is by signed activation (concept pole), NOT |activation|."""
     import numpy as np
-    import export_viewer_data as ev
+    import prefscope.viewer_export as ev
     import prefscope.interpret.io as io
 
     lens = tmp_path / "lens"
@@ -393,7 +445,7 @@ def test_export_head_to_head_paired_discordant_counts(tmp_path):
     """Discordant counts come from per-side codes z_a/z_b (NOT the sign-flipped bank), and
     accumulate per unordered model pair oriented a<b by model index."""
     import numpy as np
-    import export_viewer_data as ev
+    import prefscope.viewer_export as ev
 
     # 3 A-vs-B battles, 1 feature ("fires" == z != 0):
     #  b1: A fires, B doesn't   b2: A fires, B doesn't   b3: A doesn't, B fires
@@ -418,7 +470,7 @@ def test_export_head_to_head_orientation_independent_of_column_order(tmp_path):
     """Counts land on the same (lo, hi) orientation regardless of which model is model_a
     (exercises the a_is_lo=False swap branch)."""
     import numpy as np
-    import export_viewer_data as ev
+    import prefscope.viewer_export as ev
 
     # both battles are "A expresses it, B doesn't" — but battle 2 puts B in the model_a slot
     lens = _write_side_lens(tmp_path,
@@ -438,7 +490,7 @@ def test_export_head_to_head_orientation_independent_of_column_order(tmp_path):
 def test_export_head_to_head_needs_per_side_codes(tmp_path):
     """A difference lens (only z_diff, no z_a/z_b) can't do a per-side head-to-head -> None."""
     import numpy as np
-    import export_viewer_data as ev
+    import prefscope.viewer_export as ev
     lens = tmp_path / "lens"
     lens.mkdir()
     np.save(lens / "z_diff.npy", np.zeros((2, 1), dtype=np.float32))
@@ -451,7 +503,7 @@ def test_export_head_to_head_needs_per_side_codes(tmp_path):
 def test_export_meta_has_preference_flag(tmp_path):
     """has_preference is True only when win-relevance columns reached the features table."""
     import json
-    from export_viewer_data import export_meta
+    from prefscope.viewer_export import export_meta
 
     lens = tmp_path / "lens"
     lens.mkdir()
@@ -472,14 +524,30 @@ def test_export_meta_has_preference_flag(tmp_path):
     assert export_meta(lens, None, unlabeled)["has_preference"] is False
 
 
-def test_export_meta_r2_is_loo_semantics(tmp_path):
-    """r2/is_loo are honest: loo_r2 is null unless predictions are genuinely LOO."""
+def test_export_meta_exposes_single_response_mode(tmp_path):
     import json
-    from export_viewer_data import export_meta
+    from prefscope.viewer_export import export_meta
 
     lens = tmp_path / "lens"
     lens.mkdir()
-    (lens / "manifest.json").write_text(json.dumps({"m_total": 4, "k": 2}))
+    (lens / "manifest.json").write_text(json.dumps({
+        "input_rep": "individual", "dataset_mode": "single", "m_total": 8,
+        "k": 2, "n_battles": 20,
+    }))
+    meta = export_meta(lens, None, pd.DataFrame({"feature_id": [0]}))
+    assert meta["dataset_mode"] == "single"
+
+
+def test_export_meta_r2_is_loo_semantics(tmp_path):
+    """r2/is_loo are honest: loo_r2 is null unless predictions are genuinely LOO."""
+    import json
+    from prefscope.viewer_export import export_meta
+
+    lens = tmp_path / "lens"
+    lens.mkdir()
+    (lens / "manifest.json").write_text(json.dumps({
+        "input_rep": "individual", "m_total": 4, "k": 2,
+    }))
     feats = pd.DataFrame({"feature_id": [0], "concept": ["a"], "delta_win_rate": [0.1]})
 
     insample = pd.DataFrame({

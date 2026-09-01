@@ -3,9 +3,9 @@
 A **dataset adapter** feeds your data into PrefScope as a stream of `PairItem`s —
 PrefScope's analysis reads `PairItem` objects, not any fixed file format, so you
 adapt your data once and every downstream stage reads it through the same interface.
-PrefScope ships two
-(`table` for tabular files/DataFrames, `openjury` for OpenJury annotations); this
-guide shows how to add your own.
+PrefScope ships three registered adapters: `table` for local tables and DataFrames,
+`huggingface` for Hub datasets, and `openjury` for OpenJury annotations. This guide shows
+how to add your own.
 
 Read [the registry](the-registry.md) first if you haven't — it explains how
 components are registered. This guide assumes you know that part.
@@ -36,7 +36,7 @@ class Dataset(ABC):
 
 Each yielded `PairItem` is one comparison:
 
-```python
+```text
 PairItem(id: str, x: str, y_a: str, y_b: str | None = None, pref: float | None = None,
          model_a=None, model_b=None, meta={})
 ```
@@ -47,8 +47,8 @@ PairItem(id: str, x: str, y_a: str, y_b: str | None = None, pref: float | None =
 |-------|------|---------|
 | `id` | `str` | any stable per-row id |
 | `x` | `str` | the prompt |
-| `y_a` | `str` | response A — by convention the model **under study** ("self") |
-| `y_b` | `str \| None` | response B ("other"); `None` for a single response |
+| `y_a` | `str` | response A; diagnosis callers orient the target model onto this side |
+| `y_b` | `str \| None` | response B; `None` for a single response |
 | `pref` | `float \| None` | **P(A preferred)** ∈ [0, 1] — `0.0` = B wins, `0.5` = tie, `1.0` = A wins |
 | `model_a`, `model_b` | `str \| None` | which model produced each side (needed by `diagnose`) |
 | `meta` | `dict` | free-form extras |
@@ -112,10 +112,16 @@ For tabular data you usually don't need a custom class — the built-in `table`
 adapter maps your columns onto `PairItem` fields:
 
 ```python
-from prefscope.adapters.dataset_table import CsvDataset
+from prefscope import TableDataset
 
-data = CsvDataset("battles.parquet", prompt="question", a="resp_self",
-                  b="resp_other", pref="p_self_wins", model_a="model")
+data = TableDataset(
+    "battles.parquet",
+    prompt="question",
+    a="resp_self",
+    b="resp_other",
+    pref="p_self_wins",
+    model_a="model",
+)
 codes, meta = lens.encode_pairs(data)
 ```
 

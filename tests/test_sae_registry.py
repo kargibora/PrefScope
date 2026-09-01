@@ -24,7 +24,8 @@ def _data(n=240, d=8, seed=0):
 
 def test_builtins_registered():
     avail = set(registry.available("sae"))
-    assert {"batchtopk", "simple-topk", "jumprelu"} <= avail
+    assert {"batchtopk", "signed-batchtopk", "batchtopk-relu",
+            "simple-topk", "jumprelu"} <= avail
 
 
 def test_unknown_sae_type_lists_options():

@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 
 import numpy as np
+import torch
 
 from prefscope.encode.sae import SAEProjector
 from prefscope.sae.train import train_sae
@@ -40,3 +41,24 @@ def test_no_unsafe_torch_load_in_loaders():
     src = inspect.getsource(SAEProjector.__init__)
     assert "weights_only=False" not in src
     assert "weights_only=True" in src
+
+
+def test_projector_deserializes_on_cpu_before_accelerator_transfer(tmp_path, monkeypatch):
+    ckpt = _tiny_lens(tmp_path)
+    original_load = torch.load
+    observed = {}
+
+    def checked_load(*args, **kwargs):
+        observed["map_location"] = kwargs.get("map_location")
+        return original_load(*args, **kwargs)
+
+    moved = []
+    monkeypatch.setattr(torch, "load", checked_load)
+    monkeypatch.setattr(
+        torch.nn.Module, "to",
+        lambda module, device, *args, **kwargs: moved.append(str(device)) or module)
+
+    SAEProjector(ckpt, device="mps")
+
+    assert observed["map_location"] == "cpu"
+    assert moved[-1] == "mps"

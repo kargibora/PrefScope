@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+from prefscope.analysis.presence import annotation_flag
 from scipy.stats import pearsonr, spearmanr
 
 from prefscope.pipeline.winrelevance import win_relevance, win_relevance_logistic
@@ -60,7 +62,7 @@ def _weights_from_winrel(wr: pd.DataFrame, feats, weight_col, significant_only) 
         if sig_col not in sub.columns and "significant" in sub.columns:
             sig_col = "significant"
         if sig_col in sub.columns:
-            sub = sub.where(sub[sig_col].astype(bool), other=np.nan)
+            sub = sub.where(sub[sig_col].map(annotation_flag), other=np.nan)
     w = sub.reindex(feats)[weight_col].to_numpy(dtype=float)
     return np.nan_to_num(w, nan=0.0)
 

@@ -90,3 +90,55 @@ def test_normalize_carries_human_pref():
     assert list(out["human_pref"]) == [1.0, 0.5]
     # label-free corpus has no such column (backward compatible)
     assert "human_pref" not in normalize(_raw().iloc[:2], "x").columns
+
+
+def _prepared_single():
+    """A `prepare-dataset --single` table."""
+    return pd.DataFrame({
+        "row_id": [0, 1],
+        "prompt": ["q1", "q2"],
+        "completion_a": ["r1", "r2"],
+        "item_id": ["0", "1"],
+        "source": ["eu-instruct", "eu-instruct"],
+        "language": ["de", "cs"],
+    })
+
+
+def test_load_corpus_accepts_prepared_single_response(tmp_path):
+    p = tmp_path / "single.parquet"
+    _prepared_single().to_parquet(p, index=False)
+    loaded = load_corpus(p)
+    assert len(loaded) == 2
+    assert "completion_b" not in loaded.columns
+    assert loaded["battle_id"].str.len().eq(16).all()
+    assert (loaded["instruction_id"] == loaded["battle_id"]).all()
+    assert list(loaded["language"]) == ["de", "cs"]
+
+
+def test_load_corpus_accepts_prepared_paired(tmp_path):
+    df = _prepared_single()
+    df["completion_b"] = ["s1", "s2"]
+    df["human_pref"] = [1.0, 0.0]
+    p = tmp_path / "paired.parquet"
+    df.to_parquet(p, index=False)
+    loaded = load_corpus(p)
+    assert list(loaded["completion_b"]) == ["s1", "s2"]
+    assert list(loaded["human_pref"]) == [1.0, 0.0]
+
+
+def test_load_corpus_battle_id_is_content_stable(tmp_path):
+    df = _prepared_single()
+    df.loc[1, "prompt"] = "q1"
+    df.loc[1, "completion_a"] = "r1"
+    p = tmp_path / "dup.parquet"
+    df.to_parquet(p, index=False)
+    loaded = load_corpus(p)
+    assert loaded["battle_id"].iloc[0] == loaded["battle_id"].iloc[1]
+
+
+def test_load_corpus_defaults_optional_metadata(tmp_path):
+    p = tmp_path / "bare.parquet"
+    pd.DataFrame({"prompt": ["q"], "completion_a": ["r"]}).to_parquet(p, index=False)
+    loaded = load_corpus(p)
+    assert list(loaded["language"]) == [""]
+    assert list(loaded["source"]) == [""]

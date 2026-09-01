@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from prefscope.analysis.presence import annotation_flag
 from prefscope.pipeline.diagnose import diagnose_features
 from prefscope.pipeline.winrelevance import win_relevance
 
@@ -25,7 +26,7 @@ def _win_vector(meta: pd.DataFrame, codes: np.ndarray) -> np.ndarray:
 
 def _fidelity_feats(names, fidelity_only):
     if names is not None and fidelity_only and "fidelity_pass" in names.columns:
-        return names.loc[names["fidelity_pass"].astype(bool),
+        return names.loc[names["fidelity_pass"].map(annotation_flag),
                          "feature_id"].astype(int).tolist()
     return None
 
@@ -51,10 +52,15 @@ def diagnose(codes, meta, *, names=None, fidelity_only: bool = False) -> pd.Data
     return df.sort_values("net_direction", ascending=False).reset_index(drop=True)
 
 
-def feature_preference_relevance(codes, meta, *, names=None) -> pd.DataFrame:
-    """Per-feature univariate human-preference relevance (which directions humans
-    reward). Wraps ``win_relevance``."""
+def feature_preference_relevance(
+    codes, meta, *, names=None, group_ids=None, group_col: str | None = None,
+) -> pd.DataFrame:
+    """Per-feature descriptive preference relevance with optional prompt grouping."""
+    from prefscope.analysis.grouping import resolve_group_ids
+
     codes = np.asarray(codes, dtype=np.float32)
     win = _win_vector(meta, codes)
-    df = win_relevance(codes, win)
+    if group_ids is None and isinstance(meta, pd.DataFrame):
+        group_ids = resolve_group_ids(meta, group_col=group_col)
+    df = win_relevance(codes, win, group_ids=group_ids)
     return _attach_names(df, names)

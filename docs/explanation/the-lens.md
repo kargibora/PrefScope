@@ -7,35 +7,39 @@ is one configured choice within it.
 
 ## The contract
 
-A **lens** is a frozen encoder `f` that maps an input representation `x` to a **signed
-sparse code** `z`:
+A **lens** is a frozen encoder `f` that maps an input representation `x` to a
+**sparse code** `z`:
 
 $$
-z = f(x) \in \mathbb{R}^M ,\qquad z \text{ has at most } K \text{ nonzero entries.}
+z = f(x) \in \mathbb{R}^M ,\qquad \mathbb{E}[\|z\|_0] \approx K.
 $$
 
-Each coordinate `z_f` is one **concept axis**. Two properties define the contract:
+Each coordinate `z_f` is one feature. Two properties define the contract:
 
-1. **Sparse.** Only a few of the `M` axes fire on any one input — that is what makes
-   the code interpretable, one concept at a time.
-2. **Signed.** The sign carries the comparison. For a contrast lens over a battle,
-   `sign(z_f)` says **which side expresses concept `f` more**:
+1. **Sparse.** Only a few of the `M` axes fire on a typical input — BatchTopK controls
+   the average budget rather than imposing a strict per-row cap.
+2. **Explicit semantics.** The manifest records whether codes are non-negative
+   presences or signed axes. For an individual/prompt presence lens, `z_f ≥ 0` and
+   zero means silent. For any paired contrast code, `sign(z_f)` says **which side
+   expresses concept `f` more**:
 
    $$
    z_f > 0 \;\Leftrightarrow\; A \text{ expresses concept } f \text{ more than } B,
    \qquad z_f < 0 \;\Leftrightarrow\; B \text{ does.}
    $$
 
-This sign convention is load-bearing for everything downstream: diagnosis reads
+The manifest fields `activation_polarity` and `code_semantics` prevent those two
+quantities from being conflated. The pair sign convention is load-bearing downstream:
+diagnosis reads
 `sign(z_f)` to decide whether a model over- or under-expresses a concept, and
 verification checks that an independent reader agrees with that sign (see
 [naming and fidelity](naming-and-fidelity.md)).
 
-Once trained, `f` is **frozen** — a fixed function you reuse to inspect a battle,
-diagnose a model, or score preference. The lens directory is that frozen `f` plus its
-cached codes, the interpreted concept names (`feature_names.csv`), and a
-`manifest.json` recording how it was built. Nothing downstream hardcodes the embed
-model or dims; everything reads the manifest.
+Once trained, `f` is fixed. You can reuse it to inspect new data. Every lens directory
+contains the encoder and `manifest.json`. A build directory can also contain cached
+training codes. Concept names are optional annotations added during interpretation or
+packaging; a fresh lens build does not contain them. Downstream code reads the embedding
+model and dimensions from the manifest.
 
 ### The non-linearity caveat
 
@@ -46,16 +50,18 @@ $$
 f(e_A - e_B) \;\neq\; -\,f(e_B - e_A).
 $$
 
-So orientation must be applied **before** projection, not recovered by flipping a
-sign afterward. This is why the diagnosis bank projects both orientations explicitly
-(see [the diagnosis math doc](diagnosis-math.md) §3), and why `LensRep.oriented_codes`
-runs two genuine forward passes rather than negating one.
+For a direct difference lens, orientation must be applied **before** projection. The
+diagnosis bank therefore projects both A-minus-B and B-minus-A instead of negating one
+result. For an individual lens, PrefScope projects A and B once and forms both exact code
+differences from `z_a` and `z_b`. See [Diagnosis math](diagnosis-math.md#3-the-oriented-code-bank-pool-baseline).
 
 ## The default instantiation
 
-The default lens is a **BatchTopK Matryoshka sparse autoencoder over
-Qwen3-Embedding-8B (D = 4096)** with the `difference` representation. Each of those
-choices is configurable — see [What's configurable](#whats-configurable) below.
+The CLI defaults to a **signed BatchTopK sparse autoencoder over
+Qwen3-Embedding-8B (D = 4096)** because its default representation is `difference`.
+With `input_rep=individual` or a prompt lens, `sae_type=auto` instead selects
+non-negative BatchTopK. Matryoshka is opt-in. Each choice is configurable — see
+[What's configurable](#whats-configurable) below.
 
 ### Default embedding and input
 
@@ -66,29 +72,28 @@ by Qwen3-Embedding with last-token pooling and L2 normalization to a unit vector
 embeddings. Both are co-equal — see [representations](representations.md). (The embed
 model and `input_rep` are recorded in the manifest, never hardcoded.)
 
-### Default SAE: BatchTopK Matryoshka
+### Default SAE resolution: signed or non-negative BatchTopK
 
 The default encoder is a single-hidden-layer SAE with `M` features of which `K` fire
 (the default, not the framework — see [the SAE](sae.md) for how pinned this is):
 
 - **Encoder pre-activations:** `a = W_enc (x − b_in) + b_neuron`.
-- **BatchTopK sparsity (training):** sparsity is allocated *across the whole batch* —
-  for a batch of `B`, keep the `K·B` pre-activations largest in **absolute** value
-  (sign preserved), zero the rest. Easy examples use fewer features, hard ones more,
-  averaging to `K`.
+- **BatchTopK sparsity (training):** sparsity is allocated *across the whole batch*.
+  Signed `batchtopk` keeps the `K·B` largest magnitudes and preserves signs;
+  `batchtopk-relu` applies ReLU first and keeps the `K·B` largest positive values.
 - **Decoder / reconstruction:** `x̂ = W_dec z + b_in` with each decoder column
   (dictionary atom) kept unit-norm; the radial gradient component is projected out so
   the optimizer doesn't fight the constraint.
 - **Normalized-MSE loss:** error relative to a predict-the-mean baseline, so 1 means
   "no better than the mean" and 0 means perfect.
-- **Matryoshka nesting:** reconstruct from nested prefixes of the code and average the
-  losses, forcing low-index atoms to carry the most — a nested dictionary.
+- **Optional Matryoshka nesting:** when `--matryoshka-prefix` is supplied, reconstruct
+  from nested prefixes and average the losses. It is disabled by default.
 - **Dead-neuron auxiliary loss:** features that stop firing are revived by asking them
   to reconstruct the current residual.
-- **Inference threshold (the frozen lens):** at inference there is no batch, so a
-  learned magnitude threshold `θ` decides which axes fire: `z_f = a_f` if `|a_f| > θ`,
-  else 0. This thresholded `z = f(x)` is exactly the contract above — and it is the
-  source of the non-linearity caveat.
+- **Inference threshold (the frozen lens):** after checkpoint selection, a bounded
+  calibration pass chooses the scalar threshold that gives mean L0 near `K`.
+  Signed codes gate `|a_f|`; non-negative codes gate `ReLU(a_f)`. Deployment NMSE,
+  explained variance, L0, and dead/rare counts are recorded separately.
 
 Defaults for `M`/`K` and the prefix lengths live in the code; you set them per-build
 with `--m-total` / `--k` (see the [CLI reference](../reference/cli.md)).
@@ -98,10 +103,11 @@ with `--m-total` / `--k` (see the [CLI reference](../reference/cli.md)).
 - **Embedding model and dims** — configured at embed time, recorded in the manifest.
 - **Input representation (`input_rep`)** — `difference` / `individual` / `prompt`; see
   [representations](representations.md).
-- **SAE architecture (`--sae-type`)** — `batchtopk` / `jumprelu` / `simple-topk`, or a
-  custom one you register; see [the SAE](sae.md).
+- **SAE architecture (`--sae-type`)** — `auto`, signed `batchtopk`, non-negative
+  `batchtopk-relu`, `jumprelu`, `simple-topk`, or a custom registration; see
+  [the SAE](sae.md).
 - **`M`, `K`, Matryoshka prefixes** — build flags (`--m-total`, `--k`,
   `--matryoshka-prefix`).
 
-To add a genuinely different encoder today you would edit `prefscope/sae/`, not
-register a component. For swapping the configurable pieces, see `docs/extending/`.
+To add a different encoder, register an `sae` component and declare its polarity and
+code semantics. See [add an SAE](../extending/add-an-sae.md).
