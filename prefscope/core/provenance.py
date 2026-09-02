@@ -8,6 +8,10 @@ import numpy as np
 import pandas as pd
 
 
+_HASH_CHUNK_ROWS = 4096
+_HASH_CHUNK_ELEMENTS = 1_048_576
+
+
 def canonical_metadata_value(value):
     """Return a JSON-safe deterministic value for provenance hashing."""
     if value is None or value is pd.NA or value is pd.NaT:
@@ -49,10 +53,22 @@ def canonical_metadata_value(value):
 def ordered_dataset_hash(
     metadata: pd.DataFrame,
     arrays: dict[str, np.ndarray],
+    *,
+    chunk_rows: int = _HASH_CHUNK_ROWS,
+    chunk_elements: int = _HASH_CHUNK_ELEMENTS,
 ) -> str:
-    """Bind ordered metadata rows to named, ordered numeric arrays with SHA-256."""
+    """Bind ordered metadata rows to named arrays with bounded working memory.
+
+    Numerical arrays are validated and hashed in one row-major pass. Both the
+    row count and element count bound each canonical copy and finiteness mask,
+    including arrays whose individual rows are very wide.
+    """
     if not isinstance(metadata, pd.DataFrame):
         raise ValueError("metadata must be a pandas DataFrame")
+    if type(chunk_rows) is not int or chunk_rows <= 0:
+        raise ValueError("chunk_rows must be a positive integer")
+    if type(chunk_elements) is not int or chunk_elements <= 0:
+        raise ValueError("chunk_elements must be a positive integer")
     digest = hashlib.sha256()
     digest.update(b"prefscope-dataset-v1\0")
     columns = list(metadata.columns)
@@ -73,26 +89,38 @@ def ordered_dataset_hash(
 
     for name in sorted(arrays):
         values = np.asarray(arrays[name])
-        if values.ndim != 2 or values.dtype not in {
+        if values.ndim != 2 or values.shape[1] <= 0 or values.dtype not in {
             np.dtype(np.float32), np.dtype(bool)}:
             raise ValueError(
                 f"{name} must be a canonical float32 or boolean 2-D array "
                 "before hashing")
-        if not np.isfinite(values).all():
-            raise ValueError(f"{name} must contain only finite values")
-        if values.dtype == np.dtype(bool):
-            array = np.asarray(values, dtype=bool)
-            dtype_tag = "bool"
-        else:
-            array = np.asarray(values, dtype="<f4")
-            dtype_tag = "float32"
+        is_boolean = values.dtype == np.dtype(bool)
+        dtype_tag = "bool" if is_boolean else "float32"
         digest.update(str(name).encode("utf-8"))
         digest.update(b"\0")
-        digest.update(json.dumps(list(array.shape), separators=(",", ":")).encode())
+        digest.update(json.dumps(list(values.shape), separators=(",", ":")).encode())
         digest.update(f"\0{dtype_tag}\0".encode())
-        for start in range(0, len(array), 4096):
-            chunk = np.ascontiguousarray(array[start:start + 4096])
-            digest.update(memoryview(chunk).cast("B"))
+        width = int(values.shape[1])
+        rows_per_chunk = min(chunk_rows, max(1, chunk_elements // width))
+        for row_start in range(0, len(values), rows_per_chunk):
+            row_stop = min(row_start + rows_per_chunk, len(values))
+            if (row_stop - row_start) * width <= chunk_elements:
+                pieces = (values[row_start:row_stop],)
+            else:
+                # One row is wider than the element budget. Split that row by
+                # columns while preserving canonical C-order byte traversal.
+                pieces = (
+                    values[row_start:row_stop, column_start:column_start + chunk_elements]
+                    for column_start in range(0, width, chunk_elements)
+                )
+            for source in pieces:
+                if is_boolean:
+                    chunk = np.ascontiguousarray(source, dtype=bool)
+                else:
+                    chunk = np.ascontiguousarray(source, dtype="<f4")
+                    if not np.isfinite(chunk).all():
+                        raise ValueError(f"{name} must contain only finite values")
+                digest.update(memoryview(chunk).cast("B"))
     return digest.hexdigest()
 
 

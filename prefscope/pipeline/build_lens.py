@@ -13,14 +13,11 @@ data it writes ``z_a``. Difference lenses always require pairs.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
 import json
 import logging
 import os
 import shutil
-import socket
-import stat
 import uuid
 from pathlib import Path
 
@@ -50,113 +47,24 @@ def _remove_tree(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def _pid_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
-
-
-def _lock_owner(path: Path) -> tuple[dict | None, str]:
-    """Return validated lock metadata and a reason when it is not trustworthy."""
-    try:
-        before = path.lstat()
-        raw = path.read_text()
-        after = path.lstat()
-    except FileNotFoundError:
-        return None, "lock disappeared"
-    if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != (
-        after.st_dev, after.st_ino
-    ):
-        return None, "lock is not a stable regular file"
-    try:
-        owner = json.loads(raw)
-        pid = int(owner["pid"])
-        hostname = str(owner["hostname"])
-        owner_id = str(owner["owner_id"])
-        uuid.UUID(hex=owner_id)
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None, "lock metadata is invalid"
-    if pid <= 0 or hostname != socket.gethostname():
-        return None, "lock owner cannot be safely checked on this host"
-    return {"pid": pid, "hostname": hostname, "owner_id": owner_id}, raw
-
-
-@contextmanager
 def _publication_lock(destination: Path):
-    """Exclude another process publishing the same sibling destination."""
-    lock_path = destination.parent / f".{destination.name}.lock"
-    owner_id = uuid.uuid4().hex
-    payload = json.dumps({
-        "pid": os.getpid(),
-        "hostname": socket.gethostname(),
-        "owner_id": owner_id,
-    }, sort_keys=True)
-    for _ in range(3):
-        try:
-            descriptor = os.open(
-                lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            owner, detail = _lock_owner(lock_path)
-            if owner is None:
-                if detail == "lock disappeared":
-                    continue
-                raise RuntimeError(
-                    f"cannot publish {destination}: publication lock {lock_path} "
-                    f"is present but {detail}; refusing to remove it")
-            if _pid_is_alive(owner["pid"]):
-                raise RuntimeError(
-                    f"cannot publish {destination}: another active publisher "
-                    f"holds {lock_path} (pid {owner['pid']})")
-            # A valid same-host owner with a dead PID is the only lock we remove.
-            current, current_raw = _lock_owner(lock_path)
-            if current != owner or current_raw != detail:
-                continue
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
-            continue
-        else:
-            try:
-                os.write(descriptor, payload.encode("utf-8"))
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            break
-    else:
-        raise RuntimeError(f"could not acquire publication lock for {destination}")
+    """Load the shared advisory publication lock lazily.
 
-    try:
-        yield
-    finally:
-        try:
-            owner, _ = _lock_owner(lock_path)
-            if owner is not None and owner["owner_id"] == owner_id:
-                lock_path.unlink()
-        except FileNotFoundError:
-            pass
+    The lazy import avoids pulling the public API package into module import on
+    embedding/training workers, while keeping one lock implementation.
+    """
+    from prefscope.api._lens_publication import _publication_lock as shared_lock
+
+    return shared_lock(destination)
 
 
 def _recover_orphan_backup(destination: Path) -> None:
-    """Restore the sole prior backup left after destination-to-backup rename."""
-    if destination.exists() or destination.is_symlink():
-        return
-    backups = sorted(destination.parent.glob(f".{destination.name}.bak-*"))
-    if not backups:
-        return
-    if len(backups) != 1:
-        raise RuntimeError(
-            f"cannot recover {destination}: found multiple orphan backups "
-            f"{[path.name for path in backups]}")
-    backup = backups[0]
-    if backup.is_symlink() or not backup.is_dir():
-        raise RuntimeError(
-            f"cannot recover {destination}: orphan backup {backup} is not a directory")
-    os.replace(backup, destination)
+    """Delegate orphan recovery to the shared publication implementation."""
+    from prefscope.api._lens_publication import (
+        _recover_orphan_backup as shared_recover,
+    )
+
+    shared_recover(destination)
 
 
 def _transactional_build(out_dir, builder):

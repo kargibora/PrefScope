@@ -139,6 +139,6 @@ Every outcome/group column not already canonical must also appear in
 | `map_sample`, `map_sample_mode` | `2500`, `hybrid` (`top-activating`, `random`, `hybrid`) |
 | `coactivation_top_k`, `coactivation_max_pairs` | `20`, `20000` |
 
-See [`examples/analyze-published-lenses.yaml`](../../examples/analyze-published-lenses.yaml)
+See [`examples/workflows/analyze-published-lenses.yaml`](../../examples/workflows/analyze-published-lenses.yaml)
 for a runnable minimal example. This page, rather than that minimal file, is the complete
 accepted-key reference.

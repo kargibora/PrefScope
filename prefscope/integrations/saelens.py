@@ -6,12 +6,14 @@ remains Torch-free. The wrapped SAE still expects activations from its exact rea
 model and hook point; it is not a text encoder and is not portable across activation
 coordinate systems.
 """
+
 from __future__ import annotations
 
 import hashlib
 from importlib import metadata as importlib_metadata
 import json
 from numbers import Integral
+import re
 from typing import Mapping
 
 import numpy as np
@@ -51,8 +53,15 @@ def _infer_activation_polarity(cfg, architecture: str) -> str:
         _value(cfg, "activation_fn_str", _value(cfg, "activation_fn", ""))
     ).casefold()
     known_nonnegative = {
-        "batchtopk", "gated", "jumprelu", "jumprelu_skip_transcoder",
-        "jumprelu_transcoder", "skip_transcoder", "standard", "topk", "transcoder",
+        "batchtopk",
+        "gated",
+        "jumprelu",
+        "jumprelu_skip_transcoder",
+        "jumprelu_transcoder",
+        "skip_transcoder",
+        "standard",
+        "topk",
+        "transcoder",
     }
     if architecture in known_nonnegative or any(
         name in activation for name in ("relu", "topk", "jumprelu")
@@ -120,21 +129,29 @@ class SAELensProjector:
         batch_size = int(batch_size)
         if batch_size < 1:
             raise ValueError("batch_size must be a positive integer")
-        if isinstance(max_output_bytes, bool) or not isinstance(max_output_bytes, Integral):
+        if isinstance(max_output_bytes, bool) or not isinstance(
+            max_output_bytes, Integral
+        ):
             raise ValueError("max_output_bytes must be a positive integer")
         max_output_bytes = int(max_output_bytes)
         if max_output_bytes < 1:
             raise ValueError("max_output_bytes must be a positive integer")
-        for name, value in (("release", release), ("sae_id", sae_id),
-                            ("reader_model_revision", reader_model_revision)):
+        for name, value in (
+            ("release", release),
+            ("sae_id", sae_id),
+            ("reader_model_revision", reader_model_revision),
+        ):
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"{name} must be a non-empty string or None")
 
         d_in = _value(cfg, "d_in")
         d_sae = _value(cfg, "d_sae")
         if (
-            isinstance(d_in, bool) or not isinstance(d_in, Integral) or int(d_in) < 1
-            or isinstance(d_sae, bool) or not isinstance(d_sae, Integral)
+            isinstance(d_in, bool)
+            or not isinstance(d_in, Integral)
+            or int(d_in) < 1
+            or isinstance(d_sae, bool)
+            or not isinstance(d_sae, Integral)
             or int(d_sae) < 1
         ):
             raise ValueError("SAELens cfg must declare positive integer d_in and d_sae")
@@ -147,8 +164,13 @@ class SAELensProjector:
 
         architecture = _architecture(cfg)
         supported_architectures = {
-            "gated", "jumprelu", "jumprelu_skip_transcoder",
-            "jumprelu_transcoder", "skip_transcoder", "standard", "topk",
+            "gated",
+            "jumprelu",
+            "jumprelu_skip_transcoder",
+            "jumprelu_transcoder",
+            "skip_transcoder",
+            "standard",
+            "topk",
             "transcoder",
         }
         if architecture not in supported_architectures:
@@ -159,7 +181,8 @@ class SAELensProjector:
             )
         polarity = (
             _infer_activation_polarity(cfg, architecture)
-            if activation_polarity is None else activation_polarity
+            if activation_polarity is None
+            else activation_polarity
         )
         if polarity not in {"nonnegative", "signed", "unknown"}:
             raise ValueError(
@@ -182,7 +205,8 @@ class SAELensProjector:
                 "hook_name": str(hook_name),
                 "source_activation_preprocessing": "raw_hook_activation",
                 "sae_input_normalization": str(
-                    _value(cfg, "normalize_activations", "none") or "none"),
+                    _value(cfg, "normalize_activations", "none") or "none"
+                ),
                 "activation_reshape": str(reshape),
                 "activation_layout": layout,
             }
@@ -197,30 +221,39 @@ class SAELensProjector:
                 "prepend_bos": _value(metadata, "prepend_bos"),
                 "seqpos_slice": _value(metadata, "seqpos_slice"),
                 "model_from_pretrained_kwargs": _value(
-                    metadata, "model_from_pretrained_kwargs"),
+                    metadata, "model_from_pretrained_kwargs"
+                ),
                 "exclude_special_tokens": (
                     False
                     if _value(metadata, "exclude_special_tokens", False) is None
                     else _value(metadata, "exclude_special_tokens", False)
                 ),
             }
-            contract.update({
-                key: _json_value(value)
-                for key, value in optional.items() if value is not None
-            })
+            contract.update(
+                {
+                    key: _json_value(value)
+                    for key, value in optional.items()
+                    if value is not None
+                }
+            )
         else:
-            contract = {str(key): _json_value(value)
-                        for key, value in dict(representation_contract).items()}
+            contract = {
+                str(key): _json_value(value)
+                for key, value in dict(representation_contract).items()
+            }
             required = {
-                "representation_family", "model_id", "hook_name",
-                "source_activation_preprocessing", "sae_input_normalization",
-                "activation_reshape", "activation_layout",
+                "representation_family",
+                "model_id",
+                "hook_name",
+                "source_activation_preprocessing",
+                "sae_input_normalization",
+                "activation_reshape",
+                "activation_layout",
             }
             missing = sorted(required - set(contract))
             if missing:
                 raise ValueError(
-                    "SAELens representation_contract is incomplete; missing "
-                    f"{missing}"
+                    f"SAELens representation_contract is incomplete; missing {missing}"
                 )
             if contract.get("representation_family") != "internal_activation":
                 raise ValueError(
@@ -240,7 +273,9 @@ class SAELensProjector:
                     "source preprocessing"
                 )
             supported_normalization = {
-                "none", "expected_average_only_in", "layer_norm",
+                "none",
+                "expected_average_only_in",
+                "layer_norm",
                 "constant_norm_rescale",
             }
             if contract.get("sae_input_normalization") not in supported_normalization:
@@ -272,13 +307,15 @@ class SAELensProjector:
                 "model_id": _value(metadata, "model_name"),
                 "hook_name": _value(metadata, "hook_name"),
                 "sae_input_normalization": (
-                    _value(cfg, "normalize_activations", "none") or "none"),
+                    _value(cfg, "normalize_activations", "none") or "none"
+                ),
                 "activation_reshape": reshape,
             }
             if reader_model_revision is not None:
                 declared_coordinates["model_revision"] = reader_model_revision
             contradictions = [
-                key for key, value in declared_coordinates.items()
+                key
+                for key, value in declared_coordinates.items()
                 if value is not None and contract.get(key) != _json_value(value)
             ]
             if contradictions:
@@ -287,8 +324,9 @@ class SAELensProjector:
                     f"{sorted(contradictions)}"
                 )
 
-        contract = dict(validate_portable_mapping(
-            contract, where="SAELens representation contract"))
+        contract = dict(
+            validate_portable_mapping(contract, where="SAELens representation contract")
+        )
 
         self.sae = sae
         self.release = release
@@ -307,29 +345,37 @@ class SAELensProjector:
         self.selection_rule = f"saelens:{architecture}"
         self.representation_contract = contract
         self.coordinate_pin_status = (
-            "reader_revision_declared_sae_unpinned" if reader_model_revision
+            "reader_revision_declared_sae_unpinned"
+            if reader_model_revision
             else "reader_and_sae_unpinned"
         )
         self.device = str(getattr(sae, "device", _value(cfg, "device", "cpu")))
-        self.dtype = str(getattr(sae, "dtype", _value(cfg, "dtype", "float32"))).replace(
-            "torch.", ""
-        )
+        self.dtype = str(
+            getattr(sae, "dtype", _value(cfg, "dtype", "float32"))
+        ).replace("torch.", "")
         try:
             version = importlib_metadata.version("sae-lens")
         except importlib_metadata.PackageNotFoundError:
             version = None
-        cfg_dict = cfg.to_dict() if callable(getattr(cfg, "to_dict", None)) else {
-            "architecture": architecture,
-            "d_in": self.input_dim,
-            "d_sae": self.m_total,
-        }
+        cfg_dict = (
+            cfg.to_dict()
+            if callable(getattr(cfg, "to_dict", None))
+            else {
+                "architecture": architecture,
+                "d_in": self.input_dim,
+                "d_sae": self.m_total,
+            }
+        )
         cfg_payload = json.dumps(
-            _json_value(cfg_dict), sort_keys=True, separators=(",", ":"),
+            _json_value(cfg_dict),
+            sort_keys=True,
+            separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
         config_fingerprint = hashlib.sha256(cfg_payload).hexdigest()
         self.projector_provenance = {
-            key: value for key, value in {
+            key: value
+            for key, value in {
                 "backend": "saelens",
                 "saelens_version": version,
                 "release": release,
@@ -341,7 +387,8 @@ class SAELensProjector:
                 "sae_config_fingerprint": config_fingerprint,
                 "item_projection_policy": item_projection_policy,
                 "representation_contract": contract,
-            }.items() if value is not None
+            }.items()
+            if value is not None
         }
         parameters_fn = getattr(self.sae, "parameters", None)
         if callable(parameters_fn):
@@ -451,7 +498,9 @@ class SAELensProjector:
                 tensor_kwargs = {"device": self.device}
                 if torch_dtype is not None:
                     tensor_kwargs["dtype"] = torch_dtype
-                tensor = torch.as_tensor(matrix[start:start + chunk_size], **tensor_kwargs)
+                tensor = torch.as_tensor(
+                    matrix[start : start + chunk_size], **tensor_kwargs
+                )
                 encoded = self.sae.encode(tensor)
                 if bool(getattr(encoded, "is_sparse", False)):
                     encoded = encoded.to_dense()
@@ -466,7 +515,9 @@ class SAELensProjector:
                         f"SAELens encode returned shape {chunk.shape}; expected {expected}"
                     )
                 if not np.isfinite(chunk).all():
-                    raise ValueError("SAELens encode returned non-finite feature activity")
+                    raise ValueError(
+                        "SAELens encode returned non-finite feature activity"
+                    )
                 if self.activation_polarity == "nonnegative" and (chunk < 0).any():
                     raise ValueError(
                         "SAELens encode returned negative values despite a "
@@ -486,23 +537,24 @@ class SAELensProjector:
             )
         out = np.empty((matrix.shape[0], self.m_total), dtype=np.float32)
         for start, chunk in self._encoded_chunks(matrix, batch=batch):
-            out[start:start + len(chunk)] = chunk
+            out[start : start + len(chunk)] = chunk
         return out
 
     def validate_activation_contract(
         self, contract: Mapping[str, object]
     ) -> dict[str, object]:
         """Compare independently declared source coordinates with the SAE contract."""
-        actual = dict(validate_portable_mapping(
-            contract, where="SAELens activation source contract"))
+        actual = dict(
+            validate_portable_mapping(
+                contract, where="SAELens activation source contract"
+            )
+        )
         mismatches = []
         for key, expected in self.representation_contract.items():
             if key not in actual:
                 mismatches.append(f"missing {key}")
             elif actual[key] != expected:
-                mismatches.append(
-                    f"{key}: expected {expected!r}, got {actual[key]!r}"
-                )
+                mismatches.append(f"{key}: expected {expected!r}, got {actual[key]!r}")
         if mismatches:
             raise ValueError(
                 "activation source is incompatible with this SAELens checkpoint: "
@@ -538,7 +590,9 @@ class SAELensProjector:
         rows = validate_row_ids(row_ids)
         token_ids = tuple(str(value) for value in token_row_ids)
         if len(token_ids) != len(matrix):
-            raise ValueError("token_row_ids must contain one item ID per activation row")
+            raise ValueError(
+                "token_row_ids must contain one item ID per activation row"
+            )
         positions = {row_id: index for index, row_id in enumerate(rows)}
         unknown = sorted(set(token_ids) - set(positions))
         if unknown:
@@ -565,7 +619,9 @@ class SAELensProjector:
             )
         selected_index = np.asarray(selected, dtype=int)
         out = np.full((len(rows), len(selected)), -np.inf, dtype=np.float32)
-        group_positions = np.asarray([positions[value] for value in token_ids], dtype=int)
+        group_positions = np.asarray(
+            [positions[value] for value in token_ids], dtype=int
+        )
         for start, chunk in self._encoded_chunks(matrix, batch=batch):
             stop = start + len(chunk)
             np.maximum.at(out, group_positions[start:stop], chunk[:, selected_index])
@@ -694,27 +750,33 @@ class SAELensTextBackend(LensBackend):
         hook_head_index = self._metadata_value("hook_head_index")
         token_rows = []
         model_class = str(
-            self._metadata_value("model_class_name") or "HookedTransformer")
+            self._metadata_value("model_class_name") or "HookedTransformer"
+        )
         is_proxy = model_class == "AutoModelForCausalLM" or (
-            type(model).__name__ == "HookedProxyLM")
+            type(model).__name__ == "HookedProxyLM"
+        )
         for text in texts:
             if is_proxy:
                 tokens = model.to_tokens(
-                    str(text), truncate=False, prepend_bos=False,
-                    move_to_device=False)
+                    str(text), truncate=False, prepend_bos=False, move_to_device=False
+                )
                 if prepend_bos:
-                    bos_id = getattr(getattr(model, "tokenizer", None),
-                                     "bos_token_id", None)
+                    bos_id = getattr(
+                        getattr(model, "tokenizer", None), "bos_token_id", None
+                    )
                     if bos_id is None:
                         raise ValueError(
-                            "reader metadata requests BOS but tokenizer has no BOS ID")
+                            "reader metadata requests BOS but tokenizer has no BOS ID"
+                        )
                     bos = torch.full(
-                        (tokens.shape[0], 1), int(bos_id), dtype=tokens.dtype)
+                        (tokens.shape[0], 1), int(bos_id), dtype=tokens.dtype
+                    )
                     tokens = torch.cat((bos, tokens), dim=1)
                 tokens = tokens.to(self.device)
             else:
                 tokens = model.to_tokens(
-                    str(text), truncate=False, prepend_bos=prepend_bos)
+                    str(text), truncate=False, prepend_bos=prepend_bos
+                )
             if context_size is not None and int(tokens.shape[1]) > int(context_size):
                 if self.long_text_policy == "error":
                     raise ValueError(
@@ -736,18 +798,21 @@ class SAELensTextBackend(LensBackend):
         hook_name = str(self.projector.representation_contract["hook_name"])
         try:
             from sae_lens.util import extract_stop_at_layer_from_tlens_hook_name
+
             stop_at_layer = extract_stop_at_layer_from_tlens_hook_name(hook_name)
-        except ImportError:
-            # Preserve standard TransformerLens block-hook behavior in lightweight
-            # installs where the optional SAELens package is not present.
-            parts = hook_name.split(".")
-            stop_at_layer = (
-                int(parts[1]) + 1
-                if len(parts) >= 3 and parts[0] == "blocks" and parts[1].isdigit()
-                else None
-            )
-        except ValueError:
-            stop_at_layer = None
+        except (ImportError, ValueError):
+            # Keep the text backend usable without the optional ``sae-lens`` package.
+            # TransformerLens stops *after* the block that owns the requested hook,
+            # so ``blocks.3.*`` requires ``stop_at_layer=4``. Published SAE metadata
+            # also carries ``hook_layer`` for hook names that do not use this form.
+            match = re.search(r"(?:^|\.)blocks\.(\d+)(?:\.|$)", hook_name)
+            hook_layer = self._metadata_value("hook_layer", None)
+            if match is not None:
+                stop_at_layer = int(match.group(1)) + 1
+            elif isinstance(hook_layer, int) and not isinstance(hook_layer, bool):
+                stop_at_layer = hook_layer + 1
+            else:
+                stop_at_layer = None
         for length, entries in by_length.items():
             stacked = torch.stack([tokens for _, tokens in entries], dim=0)
             run_options = {
@@ -775,21 +840,33 @@ class SAELensTextBackend(LensBackend):
                 tokenizer = getattr(model, "tokenizer", None)
                 if tokenizer is None:
                     raise ValueError(
-                        "exclude_special_tokens=True requires a reader tokenizer")
+                        "exclude_special_tokens=True requires a reader tokenizer"
+                    )
                 try:
                     from sae_lens.util import get_special_token_ids
+
                     special_ids = set(get_special_token_ids(tokenizer))
                 except ImportError:
-                    # Match SAELens' structural-token policy without importing the
-                    # optional package. Additional/chat-template tokens stay included.
-                    structural_attrs = (
-                        "bos_token_id", "eos_token_id", "pad_token_id",
-                        "sep_token_id", "decoder_start_token_id",
-                    )
+                    # Match SAELens' standard-token policy without requiring the
+                    # optional package at runtime. ``additional_special_tokens`` are
+                    # deliberately not inferred here: published metadata must list
+                    # any non-standard IDs it wants excluded explicitly.
                     special_ids = {
-                        token_id
-                        for attr in structural_attrs
-                        if (token_id := getattr(tokenizer, attr, None)) is not None
+                        int(value)
+                        for name in (
+                            "bos_token_id",
+                            "eos_token_id",
+                            "pad_token_id",
+                            "sep_token_id",
+                            "cls_token_id",
+                            "mask_token_id",
+                            "unk_token_id",
+                            "decoder_start_token_id",
+                        )
+                        if isinstance(
+                            (value := getattr(tokenizer, name, None)), Integral
+                        )
+                        and not isinstance(value, bool)
                     }
             elif excluded in (False, None):
                 special_ids = set()
@@ -800,16 +877,19 @@ class SAELensTextBackend(LensBackend):
                 special_ids = {int(value) for value in excluded}
             else:
                 raise ValueError(
-                    "SAELens exclude_special_tokens must be boolean or integer list")
+                    "SAELens exclude_special_tokens must be boolean or integer list"
+                )
             for local, (original, tokens) in enumerate(entries):
                 selected_positions = [
-                    position for position in positions
+                    position
+                    for position in positions
                     if int(tokens[position]) not in special_ids
                 ]
                 if not selected_positions:
                     raise ValueError(
                         "one text contains no analyzed tokens after "
-                        "BOS/seqpos/special-token selection")
+                        "BOS/seqpos/special-token selection"
+                    )
                 value = hook[local, selected_positions]
                 if value.ndim != 2 or int(value.shape[1]) != self.projector.input_dim:
                     raise ValueError(
@@ -989,6 +1069,11 @@ class SAELensTextBackend(LensBackend):
         compatibility = self.projector.validate_activation_contract(
             self.projector.representation_contract
         )
+        from prefscope.api._feature_space import projector_feature_space_identity
+
+        feature_space = projector_feature_space_identity(
+            self.projector, input_rep=self.input_rep, backend="saelens"
+        )
         return FeatureBatch(
             row_ids=row_ids,
             arrays=arrays,
@@ -1032,6 +1117,7 @@ class SAELensTextBackend(LensBackend):
                     "selected_features": len(selected),
                     "representation_compatibility": compatibility,
                     "projector": self.projector.projector_provenance,
+                    **feature_space,
                 },
             },
         )
@@ -1074,9 +1160,7 @@ def project_saelens_tokens(
             f"got {sorted(activations)}"
         )
     compatibility = projector.validate_activation_contract(representation_contract)
-    selected = (
-        None if feature_ids is None else validate_feature_ids(tuple(feature_ids))
-    )
+    selected = None if feature_ids is None else validate_feature_ids(tuple(feature_ids))
     selected_width = projector.m_total if selected is None else len(selected)
     output_views = 3 if "response_b" in activations else 1
     estimated_output_bytes = (
@@ -1089,20 +1173,30 @@ def project_saelens_tokens(
     arrays = {}
     if lens.input_rep == "prompt":
         arrays["z_prompt"] = projector.project_grouped(
-            activations["prompt"], memberships["prompt"], row_ids=rows,
-            feature_ids=selected, batch=batch)
+            activations["prompt"],
+            memberships["prompt"],
+            row_ids=rows,
+            feature_ids=selected,
+            batch=batch,
+        )
     else:
         arrays["z_a"] = projector.project_grouped(
-            activations["response_a"], memberships["response_a"], row_ids=rows,
-            feature_ids=selected, batch=batch)
+            activations["response_a"],
+            memberships["response_a"],
+            row_ids=rows,
+            feature_ids=selected,
+            batch=batch,
+        )
         if "response_b" in activations:
             arrays["z_b"] = projector.project_grouped(
-                activations["response_b"], memberships["response_b"], row_ids=rows,
-                feature_ids=selected, batch=batch)
+                activations["response_b"],
+                memberships["response_b"],
+                row_ids=rows,
+                feature_ids=selected,
+                batch=batch,
+            )
             arrays["z_diff"] = arrays["z_a"] - arrays["z_b"]
-    selected = (
-        tuple(range(projector.m_total)) if selected is None else selected
-    )
+    selected = tuple(range(projector.m_total)) if selected is None else selected
     roles = {
         "z_prompt": "prompt",
         "z_a": "response_a",
@@ -1115,6 +1209,11 @@ def project_saelens_tokens(
         "z_b": "absolute_b",
         "z_diff": "a_minus_b",
     }
+    from prefscope.api._feature_space import projector_feature_space_identity
+
+    feature_space = projector_feature_space_identity(
+        projector, input_rep=lens.input_rep, backend="saelens"
+    )
     return FeatureBatch(
         row_ids=rows,
         arrays=arrays,
@@ -1136,11 +1235,13 @@ def project_saelens_tokens(
                     ),
                     "code_semantics": (
                         "activity_difference"
-                        if name == "z_diff" else projector.code_semantics
+                        if name == "z_diff"
+                        else projector.code_semantics
                     ),
                     "derivation": (
                         "a_minus_b_after_post_sae_max"
-                        if name == "z_diff" else "post_sae_max"
+                        if name == "z_diff"
+                        else "post_sae_max"
                     ),
                 }
                 for name in arrays
@@ -1152,11 +1253,14 @@ def project_saelens_tokens(
                 "selected_features": len(selected),
                 "representation_compatibility": compatibility,
                 "projector": projector.projector_provenance,
+                **feature_space,
             },
         },
     )
 
 
 __all__ = [
-    "SAELensProjector", "SAELensTextBackend", "project_saelens_tokens",
+    "SAELensProjector",
+    "SAELensTextBackend",
+    "project_saelens_tokens",
 ]

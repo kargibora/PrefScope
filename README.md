@@ -99,6 +99,7 @@ semantic-presence evidence, and outcome association as separate artifacts.
 | If you want to… | Start here |
 |---|---|
 | Build and interpret a new lens | [Quickstart](#quickstart-build-a-lens) |
+| Featurize one item or dataset with an existing lens | [Small Python examples](#self-contained-example-gallery) |
 | Analyze a dataset with an already interpreted lens | [`prefscope analyze`](#analyze-with-published-lenses) |
 | Use a pretrained internal-activation SAE | [Use SAELens](https://github.com/kargibora/PrefScope/blob/main/docs/how-to/use-saelens.md) |
 | Add a custom lens backend | [Add a lens backend](https://github.com/kargibora/PrefScope/blob/main/docs/extending/add-a-lens-backend.md) |
@@ -182,7 +183,34 @@ claims, run `prefscope interpret calibrate-presence`. See
 selection and disjoint-confirmation stages.
 
 For a guided explanation, see [Your first lens](https://github.com/kargibora/PrefScope/blob/main/docs/tutorials/your-first-lens.md).
-[`examples/research.yaml`](https://github.com/kargibora/PrefScope/blob/main/examples/research.yaml) shows a higher-cost research profile.
+[`examples/workflows/research.yaml`](https://github.com/kargibora/PrefScope/blob/main/examples/workflows/research.yaml) shows a higher-cost research profile.
+
+## Self-contained example gallery
+
+Examples are grouped by capability under `examples/inference`, `examples/training`,
+`examples/analysis`, `examples/workflows`, and `examples/advanced`. Basic scripts keep
+editable constants at the top and run without command-line configuration:
+
+```bash
+.venv/bin/python examples/analysis/outcome_association.py
+.venv/bin/python examples/inference/single_item.py
+.venv/bin/python examples/inference/local_dataset.py
+.venv/bin/python examples/analysis/inspect_local_features.py
+.venv/bin/python examples/inference/huggingface_dataset.py
+.venv/bin/python examples/training/train_completion_lens.py
+```
+
+Each runnable card uses `observe_run(..., pretty=True)` for compact progress and prints a
+small result to stdout. The log remains separate from the scientific output. Inference
+cards show `Lens.from_config → PairItem rows → Lens.featurize → save_feature_batch` and
+can switch between the adjacent SAELens and native-lens YAML files by editing one
+constant.
+
+Feature bundles retain input text and labels, so they are local, private artifacts. Raw
+SAE activity is not semantic presence, reward, or quality. `FeatureCatalog` keeps proposed
+names/descriptions separate from numerical batches; `feature_activation_table(...)` joins
+by feature ID, and `FeatureTableRenderer` prints the resulting table. See the
+[`examples/README.md`](examples/README.md) capability matrix for status and prerequisites.
 
 ## Analyze with published lenses
 
@@ -191,7 +219,7 @@ prepare the data, load the lenses, featurize the rows, and export the analysis a
 From a source checkout, start with the repository template:
 
 ```bash
-cp examples/analyze-published-lenses.yaml analysis.yaml
+cp examples/workflows/analyze-published-lenses.yaml analysis.yaml
 # Edit the lens repositories, dataset columns, and output directory.
 prefscope analyze --config analysis.yaml
 ```
@@ -317,7 +345,7 @@ Use the narrowest contract that fits the extension:
 
 See [Add a lens backend](https://github.com/kargibora/PrefScope/blob/main/docs/extending/add-a-lens-backend.md),
 [Extending PrefScope](https://github.com/kargibora/PrefScope/blob/main/docs/extending/the-registry.md), and
-[`examples/custom_analysis_api.py`](https://github.com/kargibora/PrefScope/blob/main/examples/custom_analysis_api.py).
+[`examples/advanced/custom_analysis_api.py`](https://github.com/kargibora/PrefScope/blob/main/examples/advanced/custom_analysis_api.py).
 
 ## Documentation
 

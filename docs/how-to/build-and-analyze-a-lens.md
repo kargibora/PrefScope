@@ -70,7 +70,7 @@ never hardcoded).
 
 ## 3. Analyze by concept — one config
 
-Write a `pipeline.yaml` (copy [`examples/pipeline.yaml`](../../examples/pipeline.yaml)):
+Write a `pipeline.yaml` (copy [`examples/workflows/pipeline.yaml`](../../examples/workflows/pipeline.yaml)):
 
 ```yaml
 lens_dir: lenses/mylens

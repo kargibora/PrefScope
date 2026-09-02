@@ -90,5 +90,5 @@ For exploration only, omit `--semantic-presence-only` or call
 `lens.concept_activations(codes)`. This returns numerical activations. Do not describe
 all of them as semantic concept presence.
 
-See the [Python API reference](../reference/python-api.md#feature_table-concept_activations-filterable-activations)
+See the [Python API reference](../reference/python-api.md#feature-catalogs-and-activation-tables)
 and [semantic presence explanation](../explanation/presence-and-context.md).

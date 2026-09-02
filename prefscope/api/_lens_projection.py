@@ -1,4 +1,5 @@
 """Internal representation projection and encoding for the Lens facade."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -14,12 +15,16 @@ def _get_lens_rep(name):
 
     return get_lens_rep(name)
 
+
 def representation_contract_fingerprint(contract) -> str:
     encoded = json.dumps(
-        dict(contract), sort_keys=True, separators=(",", ":"),
+        dict(contract),
+        sort_keys=True,
+        separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
 
 def expected_representation_contract(lens) -> dict | None:
     declared = getattr(lens.projector, "representation_contract", None)
@@ -31,7 +36,8 @@ def expected_representation_contract(lens) -> dict | None:
     if typed is None or not typed.embed_model_id:
         return None
     return {
-        key: value for key, value in {
+        key: value
+        for key, value in {
             "representation_family": "text_embedding",
             "embed_model_id": typed.embed_model_id,
             "embed_model_revision": typed.embed_model_revision,
@@ -41,11 +47,16 @@ def expected_representation_contract(lens) -> dict | None:
             "normalization": typed.normalization,
             "dtype": typed.dtype,
             "backend": typed.backend,
-        }.items() if value is not None
+        }.items()
+        if value is not None
     }
 
+
 def validate_representation_contract(
-    lens, batch, *, allow_mismatch: bool,
+    lens,
+    batch,
+    *,
+    allow_mismatch: bool,
 ) -> dict[str, object]:
     expected = lens._expected_representation_contract()
     if expected is None:
@@ -74,12 +85,12 @@ def validate_representation_contract(
                 mismatch.append(f"missing {key}")
             elif actual[key] != expected_value:
                 mismatch.append(
-                    f"{key}: expected {expected_value!r}, got {actual[key]!r}")
-        comparable_actual = {
-            key: actual[key] for key in expected if key in actual
-        }
+                    f"{key}: expected {expected_value!r}, got {actual[key]!r}"
+                )
+        comparable_actual = {key: actual[key] for key in expected if key in actual}
         observed_fingerprint = lens._representation_contract_fingerprint(
-            comparable_actual)
+            comparable_actual
+        )
     if mismatch and not allow_mismatch:
         raise ValueError(
             "representation source is incompatible with this lens: "
@@ -95,8 +106,12 @@ def validate_representation_contract(
         "mismatches": mismatch,
     }
 
+
 def project_representations(
-    lens, batch, *, allow_representation_mismatch: bool = False,
+    lens,
+    batch,
+    *,
+    allow_representation_mismatch: bool = False,
 ):
     """Project an interchangeable representation batch through this lens.
 
@@ -119,7 +134,8 @@ def project_representations(
     if not isinstance(allow_representation_mismatch, bool):
         raise ValueError("allow_representation_mismatch must be boolean")
     compatibility = lens._validate_representation_contract(
-        batch, allow_mismatch=allow_representation_mismatch)
+        batch, allow_mismatch=allow_representation_mismatch
+    )
     pin_status = getattr(lens.projector, "coordinate_pin_status", None)
     if compatibility.get("status") == "matched" and pin_status is not None:
         compatibility = {
@@ -136,7 +152,8 @@ def project_representations(
         if expected_dim is not None and value.shape[1] != int(expected_dim):
             raise ValueError(
                 f"representation array {name!r} has width {value.shape[1]} "
-                f"but lens input_dim is {expected_dim}")
+                f"but lens input_dim is {expected_dim}"
+            )
         return value
 
     if lens.input_rep == "prompt":
@@ -145,8 +162,7 @@ def project_representations(
         e_a = vector("response_a")
         rep = _get_lens_rep(lens.input_rep)
         if "response_b" in batch.arrays:
-            arrays = rep.output_arrays(
-                lens.projector, e_a, vector("response_b"))
+            arrays = rep.output_arrays(lens.projector, e_a, vector("response_b"))
         else:
             arrays = rep.single_output_arrays(lens.projector, e_a)
     roles = {
@@ -169,6 +185,7 @@ def project_representations(
         "input_dim": expected_dim,
         "dataset_hash": lens.manifest.get("dataset_hash"),
         "representation_compatibility": compatibility,
+        **lens.feature_space_identity,
     }
     projector_provenance = getattr(lens.projector, "projector_provenance", None)
     if projector_provenance is not None:
@@ -192,7 +209,8 @@ def project_representations(
                     "role": roles[name],
                     "orientation": orientations[name],
                     "activation_polarity": (
-                        "signed" if name == "z_diff" and lens.input_rep == "individual"
+                        "signed"
+                        if name == "z_diff" and lens.input_rep == "individual"
                         else lens.activation_polarity
                     ),
                     "code_semantics": (
@@ -211,6 +229,7 @@ def project_representations(
         },
     )
 
+
 def encode(lens, prompts, completions=None) -> np.ndarray:
     """Per-response concept codes for (prompt, completion) lists -> (N, M).
 
@@ -225,7 +244,8 @@ def encode(lens, prompts, completions=None) -> np.ndarray:
     if lens.input_rep == "difference":
         raise ValueError(
             "encode() needs an individual/prompt lens; a difference lens is "
-            "contrast-only — use encode_pairs(pairs)")
+            "contrast-only — use encode_pairs(pairs)"
+        )
     if lens.embedder is None:
         from prefscope.api._lens_backend import RepresentationLensBackend
         from prefscope.core.types import PairItem
@@ -233,25 +253,30 @@ def encode(lens, prompts, completions=None) -> np.ndarray:
         if isinstance(getattr(lens, "backend", None), RepresentationLensBackend):
             raise ValueError(
                 "this lens has no text embedder; encode a RepresentationBatch with "
-                "its source and call project_representations(batch)")
+                "its source and call project_representations(batch)"
+            )
         if isinstance(prompts, str):
             prompts = [prompts]
         if isinstance(completions, str):
             completions = [completions]
         prompts = list(prompts)
         if lens.input_rep == "prompt":
-            items = [PairItem(str(index), str(prompt), "")
-                     for index, prompt in enumerate(prompts)]
+            items = [
+                PairItem(str(index), str(prompt), "")
+                for index, prompt in enumerate(prompts)
+            ]
             return lens.featurize(items, views=("prompt",)).array("z_prompt")
         if completions is None:
             raise ValueError(
                 "individual lens needs completions; pass completion text(s) aligned "
-                "with prompts")
+                "with prompts"
+            )
         completions = list(completions)
         if len(prompts) != len(completions):
             raise ValueError(
                 f"prompts/completions length mismatch: {len(prompts)} vs "
-                f"{len(completions)}")
+                f"{len(completions)}"
+            )
         items = [
             PairItem(str(index), str(prompt), str(completion))
             for index, (prompt, completion) in enumerate(zip(prompts, completions))
@@ -267,19 +292,22 @@ def encode(lens, prompts, completions=None) -> np.ndarray:
         if completions is None:
             raise ValueError(
                 "individual lens needs completions; pass completion text(s) "
-                "aligned with prompts")
+                "aligned with prompts"
+            )
         prompts, completions = list(prompts), list(completions)
         if len(prompts) != len(completions):
             raise ValueError(
                 f"prompts/completions length mismatch: "
-                f"{len(prompts)} vs {len(completions)}")
+                f"{len(prompts)} vs {len(completions)}"
+            )
         e = lens.embedder.encode(prompts, completions)
     return lens.projector.project(np.asarray(e, dtype=np.float32))
 
+
 def encode_one(lens, prompt, completion=None) -> np.ndarray:
     """Concept codes for a single response -> (M,)."""
-    return lens.encode([prompt],
-                       [completion] if completion is not None else None)[0]
+    return lens.encode([prompt], [completion] if completion is not None else None)[0]
+
 
 def encode_pairs(lens, dataset, *, return_meta: bool = True):
     """Dataset -> (codes (N, M) lens-minus-other, meta DataFrame).
@@ -290,7 +318,8 @@ def encode_pairs(lens, dataset, *, return_meta: bool = True):
     """
     if lens.granularity == "token":
         raise ValueError(
-            "token-granularity lens does not support encode_pairs()/diagnose() in v0")
+            "token-granularity lens does not support encode_pairs()/diagnose() in v0"
+        )
     items = list(dataset)
     if not items:
         codes = np.empty((0, lens.projector.m_total), np.float32)
@@ -298,7 +327,8 @@ def encode_pairs(lens, dataset, *, return_meta: bool = True):
     if any(it.is_single for it in items):
         raise ValueError(
             "encode_pairs() requires y_b on every item; use encode_items() "
-            "with an individual lens for single-response data")
+            "with an individual lens for single-response data"
+        )
     if lens.representation_source is None:
         from prefscope.api._lens_backend import RepresentationLensBackend
 
@@ -307,32 +337,39 @@ def encode_pairs(lens, dataset, *, return_meta: bool = True):
             codes = features.array("z_diff")
             if not return_meta:
                 return codes
-            meta = pd.DataFrame({
-                "id": [it.id for it in items],
-                "pref": [it.pref for it in items],
-                "model_a": [it.model_a for it in items],
-                "model_b": [it.model_b for it in items],
-            })
+            meta = pd.DataFrame(
+                {
+                    "id": [it.id for it in items],
+                    "pref": [it.pref for it in items],
+                    "model_a": [it.model_a for it in items],
+                    "model_b": [it.model_b for it in items],
+                }
+            )
             return codes, meta
         raise ValueError(
             "this lens has no representation source; pass a RepresentationBatch "
-            "to project_representations or inject representation_source")
+            "to project_representations or inject representation_source"
+        )
     representations = lens.representation_source.encode(items)
     expected_ids = tuple(str(item.id) for item in items)
     if representations.row_ids != expected_ids:
         raise ValueError(
-            "representation source row_ids must exactly match input item order")
+            "representation source row_ids must exactly match input item order"
+        )
     features = lens.project_representations(representations)
     codes = features.array("z_diff")
     if not return_meta:
         return codes
-    meta = pd.DataFrame({
-        "id": [it.id for it in items],
-        "pref": [it.pref for it in items],
-        "model_a": [it.model_a for it in items],
-        "model_b": [it.model_b for it in items],
-    })
+    meta = pd.DataFrame(
+        {
+            "id": [it.id for it in items],
+            "pref": [it.pref for it in items],
+            "model_a": [it.model_a for it in items],
+            "model_b": [it.model_b for it in items],
+        }
+    )
     return codes, meta
+
 
 def encode_items(lens, dataset, *, return_meta: bool = True):
     """Encode a homogeneous iterable of paired or single-response items.
@@ -344,8 +381,7 @@ def encode_items(lens, dataset, *, return_meta: bool = True):
     Preference-based analyses still require paired contrast codes.
     """
     if lens.granularity == "token":
-        raise ValueError(
-            "token-granularity lens does not support encode_items() in v0")
+        raise ValueError("token-granularity lens does not support encode_items() in v0")
     items = list(dataset)
     meta_cols = ["id", "pref", "model_a", "model_b"]
     if not items:
@@ -356,13 +392,15 @@ def encode_items(lens, dataset, *, return_meta: bool = True):
     if bool(single.any()) and not bool(single.all()):
         raise ValueError(
             "encode_items() needs homogeneous data: either every item has y_b "
-            "or no item has y_b")
+            "or no item has y_b"
+        )
     if not bool(single.all()):
         return lens.encode_pairs(items, return_meta=return_meta)
     if lens.input_rep != "individual":
         raise ValueError(
             "single-response items need an individual lens; a difference lens "
-            "only represents A/B contrasts")
+            "only represents A/B contrasts"
+        )
     if lens.representation_source is None:
         from prefscope.api._lens_backend import RepresentationLensBackend
 
@@ -371,29 +409,37 @@ def encode_items(lens, dataset, *, return_meta: bool = True):
             codes = features.array("z_a")
             if not return_meta:
                 return codes
-            meta = pd.DataFrame({
-                "id": [it.id for it in items],
-                "pref": [it.pref for it in items],
-                "model_a": [it.model_a for it in items],
-                "model_b": [it.model_b for it in items],
-            }, columns=meta_cols)
+            meta = pd.DataFrame(
+                {
+                    "id": [it.id for it in items],
+                    "pref": [it.pref for it in items],
+                    "model_a": [it.model_a for it in items],
+                    "model_b": [it.model_b for it in items],
+                },
+                columns=meta_cols,
+            )
             return codes, meta
         raise ValueError(
             "this lens has no representation source; pass a RepresentationBatch "
-            "to project_representations or inject representation_source")
+            "to project_representations or inject representation_source"
+        )
     representations = lens.representation_source.encode(items)
     expected_ids = tuple(str(item.id) for item in items)
     if representations.row_ids != expected_ids:
         raise ValueError(
-            "representation source row_ids must exactly match input item order")
+            "representation source row_ids must exactly match input item order"
+        )
     features = lens.project_representations(representations)
     codes = features.array("z_a")
     if not return_meta:
         return codes
-    meta = pd.DataFrame({
-        "id": [it.id for it in items],
-        "pref": [it.pref for it in items],
-        "model_a": [it.model_a for it in items],
-        "model_b": [it.model_b for it in items],
-    }, columns=meta_cols)
+    meta = pd.DataFrame(
+        {
+            "id": [it.id for it in items],
+            "pref": [it.pref for it in items],
+            "model_a": [it.model_a for it in items],
+            "model_b": [it.model_b for it in items],
+        },
+        columns=meta_cols,
+    )
     return codes, meta

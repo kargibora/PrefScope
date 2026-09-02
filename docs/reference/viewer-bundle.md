@@ -6,6 +6,11 @@ visualization clients. Browsers
 cannot read `.npy`/`.parquet`, so every artifact is flattened JSON. The export format
 is self-contained and does not depend on a particular viewer repository or directory.
 
+This page documents **viewer bundle schema v2**. It is unchanged by the experimental
+Phase-1 [report bundle v3](report-bundle.md). Both use a file named
+`bundle_manifest.json`, but they have different top-level contracts, versions, loaders,
+and artifact contracts. Consumers must not guess the bundle type from other filenames.
+
 Sources of truth:
 - `prefscope/viewer_export/` — the export implementation
   (`sanitize` / `features` / `diagnosis` / `examples` / `tables` / `maps` / `cli`)

@@ -1,7 +1,7 @@
 # End-to-end config paired with the README's `lenses/demo` build command.
 # The deliberately small sample counts make this a smoke test, not a research run.
 lens_dir: lenses/demo
-corpus: examples/sample_corpus.parquet
+corpus: examples/assets/sample_corpus.parquet
 out_dir: results/demo
 stages: [name, verify, cluster, win-relevance]
 

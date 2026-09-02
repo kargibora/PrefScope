@@ -1,5 +1,6 @@
 """End-to-end smoke test of the Streamlit viewer via AppTest."""
 import json
+from pathlib import Path
 import sys
 
 import numpy as np
@@ -39,7 +40,8 @@ def test_viewer_app_renders(tmp_path, monkeypatch):
     monkeypatch.setattr(
         sys, "argv",
         ["app.py", "--", "--lens-dir", str(tmp_path), "--annotations", str(ann)])
-    at = AppTest.from_file("prefscope/viewer/app.py", default_timeout=30).run()
+    app = Path(__file__).resolve().parents[1] / "prefscope" / "viewer" / "app.py"
+    at = AppTest.from_file(str(app), default_timeout=30).run()
     assert not at.exception
     # title rendered and the corpus caption mentions the axes
     assert any("PrefScope viewer" in str(t.value) for t in at.title)

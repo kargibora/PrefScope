@@ -104,8 +104,8 @@ matrices, and `preference_relevance`.
 The same flow is available as a readable example:
 
 ```bash
-python examples/analyze_saelens_pairs.py \
-  --lens-config examples/saelens-paired-lens.yaml \
+python examples/advanced/analyze_saelens_pairs.py \
+  --lens-config examples/inference/saelens.yaml \
   --data preferences.parquet --out analysis/saelens-features \
   --item-id-col pair_id --group-id-col prompt_id
 ```
@@ -142,7 +142,7 @@ that a feature is good, bad, or causal.
 ## Inspect one prompt
 
 ```bash
-.venv/bin/python examples/saelens_prompt_concepts.py \
+.venv/bin/python examples/advanced/saelens_prompt_concepts.py \
   --prompt "Explain why the sky appears blue during the day." --top 8
 ```
 

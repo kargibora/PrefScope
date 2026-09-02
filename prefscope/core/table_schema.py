@@ -199,5 +199,37 @@ class TableContract:
             "allow_extra_columns": self.allow_extra_columns,
         }
 
+    @classmethod
+    def from_manifest(cls, value: object) -> "TableContract":
+        """Parse the exact portable representation emitted by :meth:`to_manifest`."""
+        expected = {
+            "name", "version", "required_columns", "dtypes", "unique_key",
+            "orientation", "units", "allow_extra_columns",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise ValueError(
+                f"table contract fields must be exactly {sorted(expected)}")
+        if not isinstance(value["required_columns"], list) or not isinstance(
+            value["unique_key"], list
+        ):
+            raise ValueError("table contract columns and unique_key must be arrays")
+        if not isinstance(value["dtypes"], Mapping) or not isinstance(
+            value["units"], Mapping
+        ):
+            raise ValueError("table contract dtypes and units must be objects")
+        try:
+            return cls(
+                schema_name=value["name"],
+                schema_version=value["version"],
+                required_columns=tuple(value["required_columns"]),
+                dtypes=value["dtypes"],
+                unique_key=tuple(value["unique_key"]),
+                orientation=value["orientation"],
+                units=value["units"],
+                allow_extra_columns=value["allow_extra_columns"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid portable TableContract") from exc
+
 
 __all__ = ["TableContract"]

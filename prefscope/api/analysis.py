@@ -25,6 +25,12 @@ from prefscope.api.analysis_execution import (
     DatasetAnalysisResult,
     analyze_dataset,
 )
+from prefscope.api.analysis_io import (
+    AnalysisDatasetReference,
+    LoadedAnalysisResult,
+    load_analysis_result,
+    save_analysis_result,
+)
 
 # Keep the historical public module identity for repr, pickle, and introspection even
 # though implementation now lives in focused modules.
@@ -42,7 +48,11 @@ for _public_object in (
     PairedConceptShift,
     AnalysisPlan,
     DatasetAnalysisResult,
+    AnalysisDatasetReference,
+    LoadedAnalysisResult,
     analyze_dataset,
+    load_analysis_result,
+    save_analysis_result,
 ):
     _public_object.__module__ = __name__
 del _public_object
@@ -53,5 +63,6 @@ __all__ = [
     "AnalysisComponent", "OutcomeAssociations", "FeatureArtifactDiagnostics",
     "PreferenceLengthConfounds", "PairedOutcomeShifts",
     "PromptConditionedOutcomeShifts", "PairedConceptShift", "AnalysisPlan",
-    "DatasetAnalysisResult", "analyze_dataset",
+    "DatasetAnalysisResult", "AnalysisDatasetReference", "LoadedAnalysisResult",
+    "analyze_dataset", "load_analysis_result", "save_analysis_result",
 ]

@@ -17,6 +17,7 @@ from prefscope import (
     analyze_dataset,
     preference_relevance,
 )
+from prefscope.api._lens_backend import select_feature_batch
 from prefscope.core.representation import validate_row_ids
 
 
@@ -55,7 +56,9 @@ class DemoBackend(LensBackend):
             "z_diff": np.full_like(base, 2),
         }
         names = {
-            "prompt": "z_prompt", "response_a": "z_a", "response_b": "z_b",
+            "prompt": "z_prompt",
+            "response_a": "z_a",
+            "response_b": "z_b",
             "response_difference": "z_diff",
         }
         roles = {value: key for key, value in names.items()}
@@ -67,8 +70,10 @@ class DemoBackend(LensBackend):
             roles={name: roles[name] for name in arrays},
             orientations={
                 name: {
-                    "z_prompt": "none", "z_a": "absolute_a",
-                    "z_b": "absolute_b", "z_diff": "a_minus_b",
+                    "z_prompt": "none",
+                    "z_a": "absolute_a",
+                    "z_b": "absolute_b",
+                    "z_diff": "a_minus_b",
                 }[name]
                 for name in arrays
             },
@@ -77,12 +82,16 @@ class DemoBackend(LensBackend):
             activation_polarity="nonnegative",
             code_semantics="numerical_activity",
             provenance={
-                "views": {
-                    "z_diff": {
-                        "activation_polarity": "signed",
-                        "code_semantics": "activity_difference",
+                "views": (
+                    {
+                        "z_diff": {
+                            "activation_polarity": "signed",
+                            "code_semantics": "activity_difference",
+                        }
                     }
-                }
+                    if "z_diff" in arrays
+                    else {}
+                )
             },
         )
 
@@ -98,7 +107,8 @@ def _items():
 def test_custom_backend_is_a_substitutable_lens_and_direct_analysis_input():
     lens = Lens.from_backend(DemoBackend())
     features = lens.featurize(
-        _items(), views=("prompt", "response_difference"), feature_ids=(2, 0))
+        _items(), views=("prompt", "response_difference"), feature_ids=(2, 0)
+    )
 
     assert lens.capabilities.supports("prompt", "response_difference")
     assert tuple(features.arrays) == ("z_prompt", "z_diff")
@@ -123,9 +133,39 @@ def test_custom_backend_is_a_substitutable_lens_and_direct_analysis_input():
     win_rates = preference_relevance(features)
     assert set(win_rates["feature_id"]) == {0, 2}
     assert set(win_rates["outcome_orientation"]) == {"p_a_preferred"}
-    assert set(win_rates["causal_claim"]) == {
-        "none_descriptive_dataset_specific"
-    }
+    assert set(win_rates["causal_claim"]) == {"none_descriptive_dataset_specific"}
+
+
+def test_select_feature_batch_prunes_unselected_view_semantics():
+    batch = FeatureBatch(
+        row_ids=("r",),
+        arrays={
+            "z_a": np.ones((1, 2), dtype=np.float32),
+            "z_diff": np.zeros((1, 2), dtype=np.float32),
+        },
+        roles={"z_a": "response_a", "z_diff": "response_difference"},
+        orientations={"z_a": "absolute_a", "z_diff": "a_minus_b"},
+        provenance={
+            "producer": "test",
+            "views": {
+                "z_diff": {
+                    "activation_polarity": "signed",
+                    "code_semantics": "activity_difference",
+                }
+            },
+        },
+    )
+
+    selected = select_feature_batch(
+        batch,
+        views=("response_a",),
+        feature_ids=None,
+        allow_extra=True,
+    )
+
+    assert tuple(selected.arrays) == ("z_a",)
+    assert selected.provenance["views"] == {}
+    assert selected.provenance["producer"] == "test"
 
 
 def test_custom_backend_internal_projector_does_not_change_facade_semantics():
@@ -150,8 +190,10 @@ def test_featurize_rejects_mixed_modes_and_bad_backend_alignment():
         def featurize(self, items, **kwargs):
             value = super().featurize(items, **kwargs)
             return FeatureBatch(
-                row_ids=("wrong", *value.row_ids[1:]), arrays=value.arrays,
-                roles=value.roles, orientations=value.orientations,
+                row_ids=("wrong", *value.row_ids[1:]),
+                arrays=value.arrays,
+                roles=value.roles,
+                orientations=value.orientations,
                 feature_ids=value.feature_ids,
             )
 
@@ -166,13 +208,26 @@ def test_missing_like_row_ids_fail_closed(value):
 
 
 def test_table_dataset_preserves_first_class_groups_and_metadata():
-    frame = pd.DataFrame({
-        "prompt": ["p"], "a": ["A"], "b": ["B"], "preference": [1.0],
-        "pair_id": ["x"], "conversation": ["g"], "split": ["train"],
-    })
+    frame = pd.DataFrame(
+        {
+            "prompt": ["p"],
+            "a": ["A"],
+            "b": ["B"],
+            "preference": [1.0],
+            "pair_id": ["x"],
+            "conversation": ["g"],
+            "split": ["train"],
+        }
+    )
     dataset = TableDataset(
-        frame, prompt="prompt", a="a", b="b", pref="preference", id="pair_id",
-        group_id="conversation", metadata=("split",),
+        frame,
+        prompt="prompt",
+        a="a",
+        b="b",
+        pref="preference",
+        id="pair_id",
+        group_id="conversation",
+        metadata=("split",),
     )
     item = next(iter(dataset))
     assert item.id == "x"
@@ -192,16 +247,22 @@ def test_native_representation_lens_uses_the_same_featurize_contract():
             return np.asarray(values, dtype=np.float32)
 
     items = _items()
-    source = PrecomputedRepresentationSource(RepresentationBatch(
-        row_ids=("a", "b", "c"),
-        arrays={
-            "response_a": np.array([[3, 2], [2, 1], [1, 4]]),
-            "response_b": np.array([[1, 1], [4, 0], [1, 2]]),
-        },
-    ))
-    features = Lens(Projector(), representation_source=source).featurize(items)
+    source = PrecomputedRepresentationSource(
+        RepresentationBatch(
+            row_ids=("a", "b", "c"),
+            arrays={
+                "response_a": np.array([[3, 2], [2, 1], [1, 4]]),
+                "response_b": np.array([[1, 1], [4, 0], [1, 2]]),
+            },
+        )
+    )
+    lens = Lens(Projector(), representation_source=source)
+    features = lens.featurize(items)
 
     assert tuple(features.arrays) == ("z_a", "z_b", "z_diff")
+    assert features.provenance["lens"]["feature_space_id"] is None
+    assert lens.feature_space_id is None
+    assert features.provenance["lens"]["feature_space_status"] == "unbound"
     np.testing.assert_allclose(features.array("z_diff"), [[2, 1], [-2, 1], [0, 2]])
     assert features.matrix("z_diff").activation_polarity == "signed"
     assert features.matrix("z_diff").code_semantics == "activity_difference"
@@ -216,15 +277,17 @@ def test_lens_yaml_dispatches_to_saelens_factory(monkeypatch):
         return sentinel
 
     monkeypatch.setattr(Lens, "from_saelens", classmethod(fake))
-    loaded = Lens.from_config({
-        "version": 1,
-        "backend": "saelens",
-        "release": "gpt2-small-res-jb",
-        "sae_id": "blocks.8.hook_resid_pre",
-        "device": "cpu",
-        "text_batch_size": 4,
-        "long_text_policy": "error",
-    })
+    loaded = Lens.from_config(
+        {
+            "version": 1,
+            "backend": "saelens",
+            "release": "gpt2-small-res-jb",
+            "sae_id": "blocks.8.hook_resid_pre",
+            "device": "cpu",
+            "text_batch_size": 4,
+            "long_text_policy": "error",
+        }
+    )
 
     assert loaded is sentinel
     assert captured["release"] == "gpt2-small-res-jb"
@@ -245,14 +308,17 @@ def test_capability_and_backend_output_semantics_fail_closed():
         def featurize(self, items, **kwargs):
             value = super().featurize(items, **kwargs)
             return FeatureBatch(
-                row_ids=value.row_ids, arrays=value.arrays, roles=value.roles,
+                row_ids=value.row_ids,
+                arrays=value.arrays,
+                roles=value.roles,
                 orientations={name: "none" for name in value.arrays},
                 feature_ids=value.feature_ids,
             )
 
     with pytest.raises(ValueError, match="orientation must be 'a_minus_b'"):
         Lens.from_backend(BadOrientation()).featurize(
-            _items(), views="response_difference")
+            _items(), views="response_difference"
+        )
 
     class Incomplete(DemoBackend):
         def featurize(self, items, **kwargs):
@@ -273,20 +339,29 @@ def test_custom_config_passes_explicit_device_and_rejects_string_booleans(monkey
         return DemoBackend()
 
     monkeypatch.setattr(registry, "make", make)
-    Lens.from_config({
-        "version": 1, "backend": "demo", "device": "cuda",
-        "options": {"scale": 0.1},
-    })
+    Lens.from_config(
+        {
+            "version": 1,
+            "backend": "demo",
+            "device": "cuda",
+            "options": {"scale": 0.1},
+        }
+    )
     assert captured["device"] == "cuda"
     with pytest.raises(ValueError, match="unsupported lens config version"):
         Lens.from_config({"version": True, "backend": "demo"})
     with pytest.raises(ValueError, match="unsupported lens config version"):
         Lens.from_config({"version": 1.0, "backend": "demo"})
     with pytest.raises(ValueError, match="must be a boolean"):
-        Lens.from_config({
-            "version": 1, "backend": "saelens", "release": "r", "sae_id": "s",
-            "allow_unregistered_release": "false",
-        })
+        Lens.from_config(
+            {
+                "version": 1,
+                "backend": "saelens",
+                "release": "r",
+                "sae_id": "s",
+                "allow_unregistered_release": "false",
+            }
+        )
 
 
 def test_preference_relevance_rejects_no_usable_labels():
@@ -301,9 +376,14 @@ def test_preference_relevance_rejects_no_usable_labels():
 
 def test_from_backend_rejects_manifest_semantics_that_conflict_with_backend():
     manifest = {
-        "schema_version": 2, "lens_kind": "prompt", "input_rep": "prompt",
-        "m_total": 3, "input_dim": 3, "output_arrays": ["z_prompt"],
-        "sae_type": "batchtopk", "activation_polarity": "nonnegative",
+        "schema_version": 2,
+        "lens_kind": "prompt",
+        "input_rep": "prompt",
+        "m_total": 3,
+        "input_dim": 3,
+        "output_arrays": ["z_prompt"],
+        "sae_type": "batchtopk",
+        "activation_polarity": "nonnegative",
         "code_semantics": "numerical_activity",
         "selection_rule": "batchtopk-relu",
     }
@@ -313,10 +393,16 @@ def test_from_backend_rejects_manifest_semantics_that_conflict_with_backend():
 
 def test_from_backend_rejects_invalid_manifest_and_backend_widths():
     manifest = {
-        "schema_version": 2, "lens_kind": "individual", "input_rep": "individual",
-        "m_total": 3.9, "input_dim": 3, "output_arrays": ["z_a"],
-        "sae_type": "batchtopk", "activation_polarity": "nonnegative",
-        "code_semantics": "numerical_activity", "selection_rule": "batchtopk-relu",
+        "schema_version": 2,
+        "lens_kind": "individual",
+        "input_rep": "individual",
+        "m_total": 3.9,
+        "input_dim": 3,
+        "output_arrays": ["z_a"],
+        "sae_type": "batchtopk",
+        "activation_polarity": "nonnegative",
+        "code_semantics": "numerical_activity",
+        "selection_rule": "batchtopk-relu",
     }
     with pytest.raises(ValueError, match="m_total must be a positive integer"):
         Lens.from_backend(DemoBackend(), manifest=manifest)

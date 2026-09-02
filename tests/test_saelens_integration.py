@@ -88,7 +88,8 @@ class FakeSAE:
 def _projector(monkeypatch, **kwargs):
     monkeypatch.setattr(integration, "_torch_module", lambda: FakeTorch)
     return SAELensProjector(
-        FakeSAE(), release="test-release", sae_id="layer-3", **kwargs)
+        FakeSAE(), release="test-release", sae_id="layer-3", **kwargs
+    )
 
 
 def _contract(*, layout="token"):
@@ -119,7 +120,9 @@ def test_saelens_module_and_top_level_symbol_are_torch_free():
         "assert SAELensTextBackend.__name__ == 'SAELensTextBackend'; "
         "assert 'torch' not in sys.modules"
     )
-    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
     assert result.returncode == 0, result.stderr
 
 
@@ -153,10 +156,8 @@ def test_saelens_token_projection_is_a_first_class_lens_backend(monkeypatch):
     features = lens.project_saelens_tokens(
         row_ids=("a", "b"),
         token_activations={
-            "response_a": np.array([
-                [1.0, 0.0, 2.0], [3.0, 2.0, 1.0], [4.0, 1.0, 0.0]]),
-            "response_b": np.array([
-                [1.0, 1.0, 0.0], [0.0, 4.0, 1.0], [2.0, 3.0, 0.0]]),
+            "response_a": np.array([[1.0, 0.0, 2.0], [3.0, 2.0, 1.0], [4.0, 1.0, 0.0]]),
+            "response_b": np.array([[1.0, 1.0, 0.0], [0.0, 4.0, 1.0], [2.0, 3.0, 0.0]]),
         },
         token_row_ids={
             "response_a": ("a", "a", "b"),
@@ -182,17 +183,20 @@ def test_token_path_proves_encoding_happens_before_pooling(monkeypatch):
         def encode(self, tensor):
             values = tensor.values
             self.call_sizes.append(len(values))
-            return FakeTensor(np.column_stack((
-                np.maximum(values[:, 0] - values[:, 1], 0.0),
-                np.maximum(values[:, 1] - values[:, 0], 0.0),
-            )))
+            return FakeTensor(
+                np.column_stack(
+                    (
+                        np.maximum(values[:, 0] - values[:, 1], 0.0),
+                        np.maximum(values[:, 1] - values[:, 0], 0.0),
+                    )
+                )
+            )
 
     monkeypatch.setattr(integration, "_torch_module", lambda: FakeTorch)
     projector = SAELensProjector(MixingSAE(), batch_size=1)
     token_values = np.array([[3.0, 2.0, 0.0], [2.0, 3.0, 0.0]])
 
-    post_sae_pool = projector.project_grouped(
-        token_values, ("a", "a"), row_ids=("a",))
+    post_sae_pool = projector.project_grouped(token_values, ("a", "a"), row_ids=("a",))
     pre_sae_pool = projector.project(token_values.max(axis=0, keepdims=True))
 
     np.testing.assert_allclose(post_sae_pool, [[1.0, 1.0]])
@@ -269,12 +273,17 @@ def test_saelens_rejects_structured_and_temporal_architectures():
 def test_explicit_coordinate_contract_must_be_complete_and_consistent():
     with pytest.raises(ValueError, match="incomplete"):
         SAELensProjector(
-            FakeSAE(), representation_contract={
-                "representation_family": "internal_activation"})
+            FakeSAE(),
+            representation_contract={"representation_family": "internal_activation"},
+        )
     with pytest.raises(ValueError, match="contradicts.*hook_name"):
         SAELensProjector(
-            FakeSAE(), representation_contract={
-                **_contract(), "hook_name": "blocks.4.hook_resid_pre"})
+            FakeSAE(),
+            representation_contract={
+                **_contract(),
+                "hook_name": "blocks.4.hook_resid_pre",
+            },
+        )
 
     class BareMetadata:
         model_name = None
@@ -294,7 +303,8 @@ def test_explicit_coordinate_contract_must_be_complete_and_consistent():
     ):
         with pytest.raises(ValueError, match=message):
             SAELensProjector(
-                BareSAE(), representation_contract={**_contract(), **change})
+                BareSAE(), representation_contract={**_contract(), **change}
+            )
 
 
 def test_registered_loader_uses_saelens_v650_api_and_blocks_unknown_repos(monkeypatch):
@@ -314,14 +324,19 @@ def test_registered_loader_uses_saelens_v650_api_and_blocks_unknown_repos(monkey
     monkeypatch.setitem(sys.modules, "sae_lens", root)
     monkeypatch.setitem(sys.modules, "sae_lens.loading", loading)
     monkeypatch.setitem(
-        sys.modules, "sae_lens.loading.pretrained_saes_directory", directory)
+        sys.modules, "sae_lens.loading.pretrained_saes_directory", directory
+    )
 
     projector = SAELensProjector.from_pretrained(
-        "release", "sae-id", device="cpu", dtype="float32", force_download=True)
+        "release", "sae-id", device="cpu", dtype="float32", force_download=True
+    )
     assert projector.release == "release"
     assert captured == {
-        "release": "release", "sae_id": "sae-id", "device": "cpu",
-        "dtype": "float32", "force_download": True,
+        "release": "release",
+        "sae_id": "sae-id",
+        "device": "cpu",
+        "dtype": "float32",
+        "force_download": True,
     }
     with pytest.raises(ValueError, match="trusted registry"):
         SAELensProjector.from_pretrained("owner/repo", "id")
@@ -343,17 +358,23 @@ def test_dense_memory_budget_fails_before_allocation_but_selected_grouping_works
             return FakeTensor(base + offsets)
 
     monkeypatch.setattr(integration, "_torch_module", lambda: FakeTorch)
-    projector = SAELensProjector(
-        WideSAE(), max_output_bytes=800, batch_size=10)
+    projector = SAELensProjector(WideSAE(), max_output_bytes=800, batch_size=10)
     with pytest.raises(ValueError, match="dense SAELens output"):
         projector.project(np.ones((3, 3)))
     lens = Lens(projector)
     features = lens.project_saelens_tokens(
         row_ids=("a", "b"),
-        token_activations={"response_a": np.array([
-            [1.0, 0.0, 0.0], [10.0, 0.0, 0.0], [3.0, 0.0, 0.0],
-            [8.0, 0.0, 0.0], [5.0, 0.0, 0.0],
-        ])},
+        token_activations={
+            "response_a": np.array(
+                [
+                    [1.0, 0.0, 0.0],
+                    [10.0, 0.0, 0.0],
+                    [3.0, 0.0, 0.0],
+                    [8.0, 0.0, 0.0],
+                    [5.0, 0.0, 0.0],
+                ]
+            )
+        },
         token_row_ids={"response_a": ("a", "b", "a", "b", "a")},
         representation_contract=dict(projector.representation_contract),
         feature_ids=(5, 2),
@@ -381,23 +402,30 @@ def test_real_saelens_v650_tiny_projector_matches_direct_encode_when_installed()
     from sae_lens.saes.jumprelu_sae import JumpReLUSAE, JumpReLUSAEConfig
     from sae_lens.saes.sae import SAEMetadata
 
-    values = np.array([
-        [2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [1.0, 1.0, 3.0],
-    ], dtype=np.float32)
+    values = np.array(
+        [
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [1.0, 1.0, 3.0],
+        ],
+        dtype=np.float32,
+    )
     for normalization in ("none", "layer_norm"):
-        sae = JumpReLUSAE(JumpReLUSAEConfig(
-            d_in=3,
-            d_sae=4,
-            device="cpu",
-            dtype="float32",
-            normalize_activations=normalization,
-            metadata=SAEMetadata(
-                model_name="test/reader",
-                hook_name="blocks.0.hook_resid_pre",
-                context_size=16,
-                prepend_bos=True,
-            ),
-        ))
+        sae = JumpReLUSAE(
+            JumpReLUSAEConfig(
+                d_in=3,
+                d_sae=4,
+                device="cpu",
+                dtype="float32",
+                normalize_activations=normalization,
+                metadata=SAEMetadata(
+                    model_name="test/reader",
+                    hook_name="blocks.0.hook_resid_pre",
+                    context_size=16,
+                    prepend_bos=True,
+                ),
+            )
+        )
         with torch.no_grad():
             sae.W_enc.zero_()
             sae.W_enc[:3, :3] = torch.eye(3)
@@ -419,10 +447,14 @@ def test_real_saelens_v650_flat_transcoder_variants_when_installed():
     torch = pytest.importorskip("torch")
     pytest.importorskip("sae_lens")
     from sae_lens import (
-        JumpReLUSkipTranscoder, JumpReLUSkipTranscoderConfig,
-        JumpReLUTranscoder, JumpReLUTranscoderConfig,
-        SkipTranscoder, SkipTranscoderConfig,
-        Transcoder, TranscoderConfig,
+        JumpReLUSkipTranscoder,
+        JumpReLUSkipTranscoderConfig,
+        JumpReLUTranscoder,
+        JumpReLUTranscoderConfig,
+        SkipTranscoder,
+        SkipTranscoderConfig,
+        Transcoder,
+        TranscoderConfig,
     )
     from sae_lens.saes.sae import SAEMetadata
 
@@ -434,17 +466,19 @@ def test_real_saelens_v650_flat_transcoder_variants_when_installed():
     )
     values = torch.tensor([[1.0, 0.0, -1.0]])
     for sae_class, cfg_class in variants:
-        sae = sae_class(cfg_class(
-            d_in=3,
-            d_sae=4,
-            d_out=3,
-            apply_b_dec_to_input=False,
-            metadata=SAEMetadata(
-                model_name="test/reader",
-                hook_name="blocks.0.hook_mlp_in",
-                hook_name_out="blocks.0.hook_mlp_out",
-            ),
-        ))
+        sae = sae_class(
+            cfg_class(
+                d_in=3,
+                d_sae=4,
+                d_out=3,
+                apply_b_dec_to_input=False,
+                metadata=SAEMetadata(
+                    model_name="test/reader",
+                    hook_name="blocks.0.hook_mlp_in",
+                    hook_name_out="blocks.0.hook_mlp_out",
+                ),
+            )
+        )
         projector = SAELensProjector(sae)
         result = projector.project(values.numpy())
         with torch.inference_mode():
@@ -453,7 +487,8 @@ def test_real_saelens_v650_flat_transcoder_variants_when_installed():
         assert result.shape == (1, 4)
         assert projector.activation_polarity == "nonnegative"
         grouped = projector.project_grouped(
-            values.numpy(), ("a",), row_ids=("a",), feature_ids=(0, 1))
+            values.numpy(), ("a",), row_ids=("a",), feature_ids=(0, 1)
+        )
         np.testing.assert_allclose(grouped, direct[:, :2])
 
 
@@ -462,7 +497,8 @@ def test_registered_pretrained_saelens_checkpoint_when_enabled():
     if os.environ.get("PREFSCOPE_RUN_SAELENS_SMOKE") != "1":
         pytest.skip("set PREFSCOPE_RUN_SAELENS_SMOKE=1 for the network smoke")
     lens = Lens.from_saelens(
-        "gpt2-small-res-jb", "blocks.8.hook_resid_pre", device="cpu")
+        "gpt2-small-res-jb", "blocks.8.hook_resid_pre", device="cpu"
+    )
     result = lens.projector.project(np.zeros((1, 768), dtype=np.float32))
 
     assert result.shape == (1, 24576)
@@ -481,8 +517,7 @@ def test_text_backend_featurizes_prompt_and_both_responses_with_one_reader(monke
             self.call_sizes.append(len(tensor))
             return torch.relu(tensor[:, :2])
 
-    projector = SAELensProjector(
-        TorchSAE(), release="test-release", sae_id="layer-3")
+    projector = SAELensProjector(TorchSAE(), release="test-release", sae_id="layer-3")
     monkeypatch.setattr(
         integration.SAELensProjector,
         "from_pretrained",
@@ -497,13 +532,22 @@ def test_text_backend_featurizes_prompt_and_both_responses_with_one_reader(monke
         def to_tokens(self, text, *, truncate, prepend_bos):
             assert truncate is False
             values = {
-                "prompt one": [1, 2], "prompt two": [2, 1],
-                "three": [3], "two": [2], "one": [1], "four": [4],
+                "prompt one": [1, 2],
+                "prompt two": [2, 1],
+                "three": [3],
+                "two": [2],
+                "one": [1],
+                "four": [4],
             }[text]
             return torch.tensor([[0, *values]] if prepend_bos else [values])
 
         def run_with_cache(
-            self, tokens, *, names_filter, prepend_bos, return_type=None,
+            self,
+            tokens,
+            *,
+            names_filter,
+            prepend_bos,
+            return_type=None,
             stop_at_layer=None,
         ):
             assert prepend_bos is False
@@ -521,12 +565,8 @@ def test_text_backend_featurizes_prompt_and_both_responses_with_one_reader(monke
     lens = Lens.from_saelens("test-release", "layer-3")
     lens.backend.reader_factory = reader_factory
     items = [
-        PairItem(
-            "a", "prompt one", "three", "one", 1.0,
-            meta={"group_id": "g1"}),
-        PairItem(
-            "b", "prompt two", "two", "four", 0.0,
-            meta={"group_id": "g2"}),
+        PairItem("a", "prompt one", "three", "one", 1.0, meta={"group_id": "g1"}),
+        PairItem("b", "prompt two", "two", "four", 0.0, meta={"group_id": "g2"}),
     ]
     features = lens.featurize(items, feature_ids=(1, 0), batch_size=2)
 
@@ -539,6 +579,11 @@ def test_text_backend_featurizes_prompt_and_both_responses_with_one_reader(monke
     assert features.matrix("z_diff").code_semantics == "activity_difference"
     assert features.metadata["group_id"] == ("g1", "g2")
     assert features.provenance["text_context"] == "independent_documents"
+    assert features.provenance["lens"]["feature_space_id"] == lens.feature_space_id
+    assert features.provenance["lens"]["feature_space_status"] == "declared_unpinned"
+    catalog = lens.feature_catalog.select(features.feature_ids)
+    catalog.validate_for(features.matrix("z_a"))
+    assert catalog.feature_ids == (1, 0)
     assert len(calls) == 1
     assert calls[0]["hook_names"] == [FakeMetadata.hook_name]
 
@@ -578,7 +623,12 @@ def test_text_backend_supports_proxy_tokenization_and_special_token_exclusion():
             return self
 
         def to_tokens(
-            self, text, *, truncate, prepend_bos, move_to_device,
+            self,
+            text,
+            *,
+            truncate,
+            prepend_bos,
+            move_to_device,
         ):
             assert text == "text"
             assert truncate is False
@@ -587,7 +637,12 @@ def test_text_backend_supports_proxy_tokenization_and_special_token_exclusion():
             return torch.tensor([[99, 77, 2]])
 
         def run_with_cache(
-            self, tokens, *, names_filter, prepend_bos, stop_at_layer,
+            self,
+            tokens,
+            *,
+            names_filter,
+            prepend_bos,
+            stop_at_layer,
             **kwargs,
         ):
             assert "return_type" not in kwargs

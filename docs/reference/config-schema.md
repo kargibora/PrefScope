@@ -192,7 +192,7 @@ on-disk filename if present.
 
 ## Complete annotated example
 
-(`examples/pipeline.yaml`, completion lens, full chain.)
+(`examples/workflows/pipeline.yaml`, completion lens, full chain.)
 
 ```yaml
 lens_dir: lenses/indiv_8b              # frozen completion lens (z_diff/z_a/z_b + manifest)
@@ -237,4 +237,4 @@ win_relevance:
 ```
 
 For the higher-cost multi-candidate and 300-judgment protocol, including separate
-naming and verification models, see [`examples/research.yaml`](../../examples/research.yaml).
+naming and verification models, see [`examples/workflows/research.yaml`](../../examples/workflows/research.yaml).

@@ -53,7 +53,11 @@ Detailed lookup pages.
 - [API stability](reference/api-stability.md) — stable, advanced, experimental, and internal surfaces.
 - [Components](reference/components.md) — every registered component (kind, name, params).
 - [Lens directory](reference/lens-directory.md) — files in a lens dir + manifest schema.
-- [Viewer bundle](reference/viewer-bundle.md) — the exported JSON artifacts.
+- [Durable analysis results](reference/analysis-result.md) — bounded summary tables, detached loading, and exact reattachment.
+- [Feature bundle reader](reference/feature-bundle-reader.md) — schema-2 live memory maps, limits, chunks, and eager schema-1 migration.
+- [Run observability](reference/observability.md) — event-schema-v1 JSONL logs and security boundary.
+- [Report bundles](reference/report-bundle.md) — experimental Phase-1 v3 lineage, status, evidence, payload, and recursive privacy contracts.
+- [Viewer bundle](reference/viewer-bundle.md) — the unchanged v2 exported JSON artifacts.
 - [Glossary](reference/glossary.md) — battle, lens, code, fidelity, net_direction, …
 - [Status](reference/status.md) — what's production vs experimental.
 

@@ -3,6 +3,7 @@
 This uses deterministic synthetic data. Replace ``precomputed_source`` with an embedding
 or pooled-residual provider and replace ``LinearProjector`` with a loaded PrefScope lens.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -43,13 +44,15 @@ class FeatureMagnitude(prefscope.AnalysisComponent):
     name = "feature_magnitude"
 
     def run(self, dataset):
-        table = pd.DataFrame([
-            {
-                "feature_set": name,
-                "mean_l2": float(np.linalg.norm(matrix.values, axis=1).mean()),
-            }
-            for name, matrix in dataset.features.items()
-        ])
+        table = pd.DataFrame(
+            [
+                {
+                    "feature_set": name,
+                    "mean_l2": float(np.linalg.norm(matrix.values, axis=1).mean()),
+                }
+                for name, matrix in dataset.features.items()
+            ]
+        )
         return prefscope.AnalysisArtifact(
             name=self.name,
             table=table,
@@ -76,13 +79,11 @@ def run_example():
         name="precomputed",
         provenance={"provider": "user-function", "revision": "v1"},
     )
-    lens = prefscope.Lens(
-        LinearProjector(), representation_source=source)
+    lens = prefscope.Lens(LinearProjector(), representation_source=source)
     projected = lens.project_representations(source.encode(items))
 
     # Synthetic stand-in for a real confirmation-only semantic-presence artifact.
-    prompt_values = np.array(
-        [[index // 2 < 5] for index in range(20)], dtype=bool)
+    prompt_values = np.array([[index // 2 < 5] for index in range(20)], dtype=bool)
     confirmed_prompt_presence = PresenceMatrix(
         values=prompt_values,
         feature_ids=np.array([0]),
@@ -99,16 +100,16 @@ def run_example():
     )
 
     quality_before = np.full(20, 0.4)
-    quality_after = np.array(
-        [0.8 if index // 2 < 5 else 0.3 for index in range(20)])
-    plan = prefscope.AnalysisPlan((
-        prefscope.FeatureArtifactDiagnostics(),
-        prefscope.OutcomeAssociations(feature_sets=("response_change",)),
-        prefscope.PairedOutcomeShifts(),
-        prefscope.PromptConditionedOutcomeShifts(
-            prompt_features="prompt_concepts"),
-        FeatureMagnitude(),
-    ))
+    quality_after = np.array([0.8 if index // 2 < 5 else 0.3 for index in range(20)])
+    plan = prefscope.AnalysisPlan(
+        (
+            prefscope.FeatureArtifactDiagnostics(),
+            prefscope.OutcomeAssociations(feature_sets=("response_change",)),
+            prefscope.PairedOutcomeShifts(),
+            prefscope.PromptConditionedOutcomeShifts(prompt_features="prompt_concepts"),
+            FeatureMagnitude(),
+        )
+    )
     return prefscope.analyze_dataset(
         {
             "response_change": projected.matrix("z_diff"),

@@ -19,11 +19,14 @@ from prefscope import (
     NormalizedOutcomes, OutcomeAssociationResult,
     RepresentationBatch, RepresentationSource, CallableRepresentationSource,
     EmbeddingRepresentationSource, PrecomputedRepresentationSource,
-    FeatureBatch, FeatureMatrix, TableContract,
+    FeatureBatch, FeatureMatrix, FeatureCatalog, feature_activation_table,
+    TableContract,
     OutcomeSpec, AnalysisDataset, AnalysisArtifact, AnalysisComponent, AnalysisPlan,
-    DatasetAnalysisResult, FeatureArtifactDiagnostics, OutcomeAssociations,
+    DatasetAnalysisResult, AnalysisDatasetReference, LoadedAnalysisResult,
+    FeatureArtifactDiagnostics, OutcomeAssociations,
     PairedConceptShift, PairedOutcomeSpec, PairedOutcomeShifts,
     PromptConditionedOutcomeShifts, PreferenceLengthConfounds, analyze_dataset,
+    load_analysis_result, save_analysis_result,
     preference_relevance, load_feature_batch, save_feature_batch,
     concept_presence, paired_concept_shift, compare_encoded_responses,
     registry, load_plugins,               # explicit plug-in activation
@@ -56,12 +59,145 @@ outputs = run_analysis(config)             # resumes matching partial output
 
 Sources of truth: the facades `prefscope/api/loaded_lens.py` and
 `prefscope/api/analysis.py`, their focused `_lens_*` and `analysis_*` implementation
-modules, `prefscope/api/config.py`, `prefscope/analysis/__init__.py`, and the documented
-pipeline runners.
+modules, `prefscope/api/analysis_io.py`, `prefscope/api/config.py`,
+`prefscope/analysis/__init__.py`, `prefscope/reporting/`,
+`prefscope/observability/`, and the documented pipeline runners.
 
 ---
 
 ## Interchangeable representations and typed analysis
+
+### Canonical basic featurization
+
+Load one strict lens config, normalize rows as `PairItem`, featurize them, and save the
+aligned result:
+
+```python
+from prefscope import Lens, PairItem, save_feature_batch
+
+lens = Lens.from_config("completion-lens.yaml")
+items = [
+    PairItem(
+        id="row-1",
+        x="Explain the result.",
+        y_a="Response A",
+        y_b="Response B",
+        pref=1.0,  # P(A preferred); 0.0 means B, 0.5 means a tie
+        meta={"split": "validation"},
+    )
+]
+features = lens.featurize(items, views=("response_a", "response_b"))
+save_feature_batch(features, "features/one-row")
+```
+
+For a local or Hugging Face table, use the same composition:
+
+```python
+from prefscope import (
+    HuggingFaceDataset, Lens, TableDataset, save_feature_batch,
+)
+
+lens = Lens.from_config("completion-lens.yaml")
+dataset = TableDataset(
+    "preferences.parquet",
+    prompt="prompt", a="answer_a", b="answer_b",
+    pref="p_a", id="example_id", group_id="prompt_id",
+    metadata=("split",),
+)
+# For Hub input, choose this adapter instead:
+# dataset = HuggingFaceDataset(
+#     "owner/dataset", split="train", revision="<commit-sha>", limit=1000,
+#     prompt="prompt", a="answer_a", b="answer_b",
+#     pref="p_a", id="example_id", group_id="prompt_id",
+# )
+features = lens.featurize(dataset)
+save_feature_batch(features, "features/dataset")
+```
+
+A numeric `pref` column is interpreted as P(A preferred). Categorical winner columns need
+an explicit `label_mode` and declared A/B/tie tokens; PrefScope does not guess orientation.
+
+Each call uses one lens and one feature space. In particular, apply native prompt and
+individual/completion lenses in separate runs and save separate bundles. Inspect
+`lens.capabilities.views` before selecting views. The canonical mapping is `prompt` →
+`z_prompt`, `response_a` → `z_a`, `response_b` → `z_b`, and
+`response_difference` → `z_diff`. The declared difference capability also matters:
+`f(e_A - e_B)` from direct contrast projection is distinct from
+`f(e_A) - f(e_B)` after separate encoding.
+
+This path performs featurization only. Each view declares its `code_semantics`; built-in
+native and SAELens text backends return numerical activity here. The path does not run
+analysis, propose names, calibrate semantic presence, or assign a quality score. A saved
+`FeatureBatch` retains aligned row IDs, arrays, and all supplied metadata;
+`Lens.featurize(...)` supplies prompt/response text and labels. Consequently, bundles from
+this path are **local, private artifacts**, not shareable or redacted bundles.
+
+The basic adapters and `Lens.featurize(...)` materialize data in memory. Bound work with
+source limits, selected feature IDs, selected views, and a suitable batch size. The
+schema-2 writer rejects more than 1,000,000 rows or more than 100,000,000 aggregate
+array elements across all saved views. These are safety ceilings, not recommended working
+sizes. Small source-checkout compositions are in
+[`single_item.py`](../../examples/inference/single_item.py),
+[`local_dataset.py`](../../examples/inference/local_dataset.py),
+[`inspect_local_features.py`](../../examples/analysis/inspect_local_features.py), and
+[`huggingface_dataset.py`](../../examples/inference/huggingface_dataset.py).
+
+### Feature catalogs and activation tables
+
+Numerical coordinates and display annotations have separate lifecycles. A
+`FeatureMatrix` owns codes and ordered feature IDs. A `FeatureCatalog` owns proposed
+names/descriptions plus their provenance and feature-space identity:
+
+```python
+from prefscope import feature_activation_table
+from prefscope.integrations import NeuronpediaProvider
+from prefscope.presentation import FeatureTableRenderer
+
+matrix = features.matrix("z_a")
+catalog = lens.feature_catalog
+rows = feature_activation_table(matrix, top_k=5)
+
+provider = NeuronpediaProvider.from_lens(lens)
+if not catalog.labels and provider is not None:
+    catalog = catalog.merge(provider.fetch(tuple(dict.fromkeys(int(value) for value in rows["feature_id"]))))
+
+rows = feature_activation_table(matrix, catalog=catalog, top_k=5)
+FeatureTableRenderer(max_rows=5).print(rows)
+```
+
+`FeatureCatalog` accepts only proposed display names/descriptions and their source fields;
+fidelity, calibrated presence, context, model tendency, and outcome association remain
+separate evidence artifacts. Catalog IDs are strict nonnegative integers. Duplicate,
+boolean, fractional, and reserved activation columns fail closed. `select(...)` preserves
+an explicit requested order, and `merge(...)` uses right-nonmissing precedence while
+retaining source provenance.
+
+Native lens catalogs bind to an exact SAE-weights digest. Current built-in SAELens
+coordinates record `declared_unpinned`; the identity contract reserves
+`declared_pinned_coordinate` for integrations that can prove a pinned external
+coordinate. `feature_activation_table(...)` validates a catalog against the
+matrix feature-space identity when both sides declare one and always joins by
+`FeatureMatrix.feature_ids`, so selected or reordered features remain aligned.
+
+`NeuronpediaProvider` is an explicit network adapter. It reads the checkpoint-declared
+`neuronpedia_id`, requests only selected feature IDs, and returns a catalog snapshot with
+source URLs, retrieval status, timestamps, evidence layer, and response digests. Loading
+a lens and featurizing text never fetch Neuronpedia automatically. There is no standalone
+durable catalog file schema in `0.2`; `to_frame()` is an in-memory compatibility view,
+not a versioned persistence contract. Catalogs are not silently added to schema-2 feature
+bundles.
+
+`FeatureTableRenderer` is presentation-only. Its deterministic plain formatter does not
+import Rich; terminal `style="auto"` lazily uses Rich when available and otherwise falls
+back to plain text. It bounds rows, row identifiers, and descriptions and sanitizes
+control characters. One-row tables stay compact; visible multi-row tables add `row_id` and
+`rank` columns automatically. Observability progress remains a separate event-log
+presentation channel.
+
+`Lens.feature_table` and `Lens.concept_names` remain compatibility views.
+`Lens.concept_activations(...)` now also accepts a selected/reordered `FeatureMatrix` and
+uses the common feature-activation table builder before applying its existing scientific
+filters.
 
 A vector source, lens policy, and projected feature view are separate contracts. The
 backend-neutral dataset operation is:
@@ -77,7 +213,7 @@ Both paths expose declared `LensCapabilities` and produce the same role-aware ou
 A vector source can still be controlled explicitly:
 
 ```python
-from prefscope import EmbeddingRepresentationSource, Lens
+from prefscope import EmbeddingRepresentationSource, Lens, load_feature_batch
 
 source = EmbeddingRepresentationSource(my_embedder)
 representations = source.encode(dataset)       # RepresentationBatch
@@ -139,8 +275,9 @@ artifact = AnalysisArtifact(
     "my_analysis", table, "declared estimand", table_contract=schema)
 ```
 
-The artifact manifest includes this schema. Result tables remain ordinary pandas
-DataFrames.
+The artifact manifest includes this schema. `TableContract.from_manifest(...)` strictly
+parses the exact eight-field portable form emitted by `to_manifest()`. Result tables
+remain ordinary pandas DataFrames.
 
 The result distinguishes descriptive Pearson/OLS effects from its optional
 range-midpoint Fisher inference, identifies each BH correction family, and records
@@ -234,9 +371,87 @@ screen, not evidence that a concept is bad, biased, or causal.
 
 
 A complete Torch-free composition example is in
-[`examples/custom_analysis_api.py`](../../examples/custom_analysis_api.py). It injects a
+[`examples/advanced/custom_analysis_api.py`](../../examples/advanced/custom_analysis_api.py). It injects a
 precomputed source, projects it through a duck-typed lens, composes built-in and custom
 analysis components, and compares paired outcomes without dataset-specific framework code.
+
+### Durable analysis-result I/O
+
+```text
+save_analysis_result(result, out) -> Path
+load_analysis_result(path, *, dataset=None)
+```
+
+Saving requires contracted artifacts and publishes a strict schema-1 directory of Parquet
+tables plus `manifest.json`. Loading without `dataset=` returns a distinct
+`LoadedAnalysisResult`: validated tables plus `AnalysisDatasetReference`, but no input
+arrays. Passing a complete `AnalysisDataset` reattaches only after exact ordered row-ID,
+group-source, and group-partition checks. See [Durable analysis results](analysis-result.md).
+
+### Reporting foundation (experimental)
+
+Schema-2 feature bundles can be accessed without materializing a `FeatureBatch`:
+
+```python
+from prefscope.reporting import FeatureBundleReader
+
+source = FeatureBundleReader.open("encoded/dataset")
+for chunk in source.iter_chunks(4096, views=("z_a",)):
+    consume(chunk.array("z_a"))
+```
+
+The reader validates the full bundle on open, then keeps live read-only memory maps.
+Its canonical per-view semantics property is `code_semantics_by_view`;
+`code_semantics` remains a reader compatibility alias. Schema 1 needs explicit migration
+through `load_feature_batch(...)` and `save_feature_batch(...)`. The latter compatibility
+loader is eager and validates/loads all declared arrays within fixed budgets. See
+[Feature bundle reader](feature-bundle-reader.md).
+
+`prefscope.reporting` also exports `ReportDataset`, mandatory `ReportLineage` and its
+dataset/source/compiler/sampling types, typed report v3 contracts, recursive privacy
+policies, canonical JSON-table helpers, and strict bundle I/O. Each artifact names its
+lineage `source_refs`. A v3 writer expects raw JSON to pass through `json_payload(...)`;
+direct object/table payloads are already sanitized and are not transformed twice.
+
+`prefscope.observability` exports automatic and manual event-schema-v1 JSONL recording:
+
+```python
+from prefscope import load_analysis_result
+from prefscope.observability import observe_run
+
+with observe_run("events.jsonl", pretty=True):
+    result = load_analysis_result("results/analysis")
+```
+
+The context auto-instruments supported public Lens and durable-artifact operations. No
+manual `record(...)` calls are needed. It records correlation IDs, duration, safe
+structural counts, and generic `error_type`-only automatic failures. It never generically
+serializes arguments or results. `pretty=True` adds bounded, privacy-safe progress lines
+on stderr after events are persisted; JSONL remains the durable source of truth. Rich is
+optional and lazily imported, with a plain-text fallback.
+
+For zero-code activation, set both environment variables:
+
+```bash
+PREFSCOPE_EVENTS_PATH=events.jsonl \
+PREFSCOPE_EVENTS_PRETTY=1 \
+python experiment.py
+```
+
+For production, use an existing resolved private directory; on macOS, use an existing
+directory under `/private/tmp`, not `/tmp`.
+
+`pretty=None` (the default) consults `PREFSCOPE_EVENTS_PRETTY`; `pretty=False` explicitly
+disables the terminal view. The pretty variable alone does not activate recording. The
+environment settings are sampled together when the lazy process-local run is created.
+With neither a context nor `PREFSCOPE_EVENTS_PATH`, PrefScope writes no observability
+files. `RunEvent`, `JsonlRecorder`, `RecorderLoggingHandler`, and `capture_warnings`
+remain available for custom manual use. See
+[Run observability](observability.md) for the supported boundary, privacy rules,
+process/warning limits, and secure-path requirements.
+
+These are Phase-1 foundations: no report compiler or renderer ships yet. See
+[Report bundles](report-bundle.md) and [Run observability](observability.md).
 
 Registration is import-driven. Import a trusted module directly, call
 `load_plugins(["my_package.prefscope_plugin"])`, or list it under `plugins` in a `prefscope run` config. PrefScope does not scan installed packages automatically.
@@ -357,10 +572,11 @@ for row in lens.top_concepts(codes, k=3):
     print(row)   # e.g. [('verbosity', 2.1), ('code blocks', 0.9)]
 ```
 
-### `feature_table` / `concept_activations` — filterable activations
+### `feature_catalog` / `feature_table` / `concept_activations`
 
 ```text
-lens.feature_table
+lens.feature_catalog     # proposed display labels + feature-space identity
+lens.feature_table       # compatibility view with bundled scientific annotations
 lens.concept_activations(
     codes,
     row_ids=None,
@@ -373,9 +589,11 @@ lens.concept_activations(
 ) -> pd.DataFrame
 ```
 
-`concept_activations` returns one row for each retained item-feature pair. It keeps the
-feature ID, concept name, activation, rank, pole, semantic-presence status, and bundled
-annotations. A negative value on a signed lens points away from the stored positive-pole
+`concept_activations` accepts either the historical full-width ndarray or a
+selected/reordered `FeatureMatrix`. It returns one row for each retained item-feature pair
+and joins by feature ID. It keeps the feature ID, concept name, activation, rank, pole,
+semantic-presence status, and bundled scientific annotations. A negative value on a
+signed lens points away from the stored positive-pole
 name, so the table marks it as not matching that name. Zero features are omitted by
 default because including them can create `N × M` rows.
 
@@ -712,7 +930,7 @@ LLM stage. `preflight(cfg)` (also public) fails fast on a missing lens/corpus.
 ```python
 from prefscope.pipeline.run import PipelineConfig, run_pipeline
 
-cfg = PipelineConfig.load("examples/pipeline.yaml")
+cfg = PipelineConfig.load("examples/workflows/pipeline.yaml")
 outputs = run_pipeline(cfg)            # runs name -> verify -> cluster -> win-relevance
 print(outputs["win-relevance"])        # Path to win_relevance.csv under out_dir
 ```

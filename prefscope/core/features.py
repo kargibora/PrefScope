@@ -30,6 +30,43 @@ def validate_feature_ids(values, *, width: int | None = None) -> tuple[int, ...]
     return ids
 
 
+def _validate_feature_batch_semantics(
+    array_names,
+    *,
+    activation_polarity: object,
+    code_semantics: object,
+    provenance: Mapping[str, object],
+) -> None:
+    """Validate the schema-2 global and per-view semantics contract."""
+    for name, value in (
+        ("activation_polarity", activation_polarity),
+        ("code_semantics", code_semantics),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+    names = set(array_names)
+    descriptors = provenance.get("views", {})
+    if not isinstance(descriptors, Mapping):
+        raise ValueError("feature batch provenance views must be a mapping")
+    unknown = set(descriptors) - names
+    if unknown:
+        raise ValueError(
+            "feature batch provenance has semantics for unknown arrays: "
+            f"{sorted(unknown)}")
+    for name, descriptor in descriptors.items():
+        if not isinstance(descriptor, Mapping):
+            raise ValueError(
+                f"feature batch provenance view {name!r} must be a mapping")
+        for semantic_field in ("activation_polarity", "code_semantics"):
+            value = descriptor.get(semantic_field)
+            if semantic_field in descriptor and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValueError(
+                    f"{semantic_field} for feature array {name!r} must be a "
+                    "non-empty string")
+
+
 @dataclass(frozen=True, eq=False)
 class FeatureMatrix:
     """One analysis-ready feature matrix with explicit semantic provenance.
@@ -210,9 +247,12 @@ class FeatureBatch:
             ).reshape(matrix.shape)
             widths.add(matrix.shape[1])
             checked[name] = matrix
-            if not isinstance(roles[name], str) or not roles[name]:
+            if not isinstance(roles[name], str) or not roles[name].strip():
                 raise ValueError(f"feature role for {name!r} must be non-empty")
-            if not isinstance(orientations[name], str) or not orientations[name]:
+            if (
+                not isinstance(orientations[name], str)
+                or not orientations[name].strip()
+            ):
                 raise ValueError(
                     f"feature orientation for {name!r} must be non-empty")
         if len(widths) != 1 or next(iter(widths)) <= 0:
@@ -226,10 +266,16 @@ class FeatureBatch:
         object.__setattr__(self, "arrays", MappingProxyType(checked))
         object.__setattr__(self, "roles", MappingProxyType(roles))
         object.__setattr__(self, "orientations", MappingProxyType(orientations))
+        provenance = validate_portable_mapping(self.provenance, where="provenance")
+        _validate_feature_batch_semantics(
+            checked,
+            activation_polarity=self.activation_polarity,
+            code_semantics=self.code_semantics,
+            provenance=provenance,
+        )
         object.__setattr__(self, "feature_ids", feature_ids)
         object.__setattr__(self, "metadata", _aligned_metadata(self.metadata, len(ids)))
-        object.__setattr__(
-            self, "provenance", validate_portable_mapping(self.provenance, where="provenance"))
+        object.__setattr__(self, "provenance", provenance)
 
     def array(self, name: str) -> np.ndarray:
         try:

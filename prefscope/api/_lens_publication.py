@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
 import json
 import os
 from pathlib import Path
@@ -13,110 +14,138 @@ import uuid
 from prefscope.api._lens_annotations import _annotation_paths
 from prefscope.artifacts import MANIFEST, SAE_MODEL
 
-def _pid_is_alive(pid: int) -> bool:
+
+def _locking_module():
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+        import fcntl
+    except ImportError as exc:
+        raise RuntimeError(
+            "transactional lens publication locking is unavailable on this platform"
+        ) from exc
+    return fcntl
 
 
-def _lock_owner(path: Path) -> tuple[dict | None, str]:
+def _validate_lock_parent(parent: Path) -> None:
+    if parent.is_symlink() or not parent.is_dir():
+        raise RuntimeError(f"publication lock parent must be a real directory: {parent}")
+    opened = parent.stat(follow_symlinks=False)
+    mode = stat.S_IMODE(opened.st_mode)
+    sticky = bool(opened.st_mode & stat.S_ISVTX)
+    if hasattr(os, "geteuid"):
+        owner_matches = opened.st_uid == os.geteuid()
+        if not owner_matches and not sticky:
+            raise RuntimeError(
+                f"publication lock parent is not owned by this user: {parent}"
+            )
+        if mode & 0o022 and not sticky:
+            raise RuntimeError(
+                f"publication lock parent is writable by other users: {parent}"
+            )
+
+
+def _secure_lock_descriptor(lock_path: Path) -> int:
+    _validate_lock_parent(lock_path.parent)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    cloexec = getattr(os, "O_CLOEXEC", None)
+    if nofollow is None or cloexec is None:
+        raise RuntimeError("secure publication locking requires O_NOFOLLOW and O_CLOEXEC")
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_APPEND
+        | getattr(os, "O_NONBLOCK", 0)
+        | nofollow
+        | cloexec
+    )
+    descriptor = os.open(lock_path, flags, 0o600)
     try:
-        before = path.lstat()
-        raw = path.read_text()
-        after = path.lstat()
-    except FileNotFoundError:
-        return None, "lock disappeared"
-    if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != (
-        after.st_dev, after.st_ino
-    ):
-        return None, "lock is not a stable regular file"
-    try:
-        owner = json.loads(raw)
-        pid = int(owner["pid"])
-        hostname = str(owner["hostname"])
-        owner_id = str(owner["owner_id"])
-        uuid.UUID(hex=owner_id)
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None, "lock metadata is invalid"
-    if pid <= 0 or hostname != socket.gethostname():
-        return None, "lock owner cannot be safely checked on this host"
-    return {"pid": pid, "hostname": hostname, "owner_id": owner_id}, raw
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(
+                f"publication lock must be a regular file: {lock_path}")
+        if opened.st_nlink != 1:
+            raise RuntimeError(
+                f"publication lock must have exactly one hard link: {lock_path}"
+            )
+        if hasattr(os, "geteuid") and opened.st_uid != os.geteuid():
+            raise RuntimeError(
+                f"publication lock must be owned by this user: {lock_path}"
+            )
+        os.fchmod(descriptor, 0o600)
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o600:
+            raise RuntimeError(
+                f"publication lock permissions must be 0600: {lock_path}")
+        entry = lock_path.stat(follow_symlinks=False)
+        if (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError(
+                f"publication lock changed while opening: {lock_path}")
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _write_lock_metadata(descriptor: int, owner_id: str) -> None:
+    payload = json.dumps(
+        {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "owner_id": owner_id,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    os.ftruncate(descriptor, 0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError("short write while updating publication lock metadata")
+        offset += written
+    os.fsync(descriptor)
 
 
 @contextmanager
 def _publication_lock(destination: Path):
+    """Hold a stable, never-unlinked advisory lock for one destination."""
+    fcntl = _locking_module()
     lock_path = destination.parent / f".{destination.name}.lock"
-    owner_id = uuid.uuid4().hex
-    payload = json.dumps({
-        "pid": os.getpid(),
-        "hostname": socket.gethostname(),
-        "owner_id": owner_id,
-    }, sort_keys=True)
-    for _ in range(3):
-        try:
-            descriptor = os.open(
-                lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            owner, detail = _lock_owner(lock_path)
-            if owner is None:
-                if detail == "lock disappeared":
-                    continue
-                raise RuntimeError(
-                    f"cannot publish {destination}: publication lock {lock_path} "
-                    f"is present but {detail}; refusing to remove it")
-            if _pid_is_alive(owner["pid"]):
-                raise RuntimeError(
-                    f"cannot publish {destination}: another active publisher "
-                    f"holds {lock_path} (pid {owner['pid']})")
-            current, current_raw = _lock_owner(lock_path)
-            if current != owner or current_raw != detail:
-                continue
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
-            continue
-        else:
-            lock_stat = os.fstat(descriptor)
-            try:
-                encoded = payload.encode("utf-8")
-                offset = 0
-                while offset < len(encoded):
-                    written = os.write(descriptor, encoded[offset:])
-                    if written <= 0:
-                        raise OSError("short write while creating publication lock")
-                    offset += written
-                os.fsync(descriptor)
-            except BaseException:
-                os.close(descriptor)
-                try:
-                    current_stat = lock_path.stat(follow_symlinks=False)
-                    if (
-                        current_stat.st_dev == lock_stat.st_dev
-                        and current_stat.st_ino == lock_stat.st_ino
-                    ):
-                        lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                raise
-            else:
-                os.close(descriptor)
-            break
-    else:
-        raise RuntimeError(f"could not acquire publication lock for {destination}")
     try:
+        descriptor = _secure_lock_descriptor(lock_path)
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot securely open publication lock {lock_path}") from exc
+
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+            raise RuntimeError(
+                f"cannot publish {destination}: another active publisher holds "
+                f"{lock_path}"
+            ) from exc
+
+        # Metadata helps operators identify the last/acquiring process, but it
+        # never decides ownership. Only the kernel advisory lock does that.
+        owner_id = uuid.uuid4().hex
+        _write_lock_metadata(descriptor, owner_id)
+        opened = os.fstat(descriptor)
+        entry = lock_path.stat(follow_symlinks=False)
+        if opened.st_nlink != 1:
+            raise RuntimeError(
+                f"publication lock acquired an unsafe hard link: {lock_path}"
+            )
+        if (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError(
+                f"publication lock directory entry changed: {lock_path}")
         yield
     finally:
         try:
-            owner, _ = _lock_owner(lock_path)
-            if owner is not None and owner["owner_id"] == owner_id:
-                lock_path.unlink()
-        except FileNotFoundError:
-            pass
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _recover_orphan_backup(destination: Path) -> None:

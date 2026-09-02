@@ -9,8 +9,8 @@ changelog entry and a compatibility path when scientifically safe.
 Use these for ordinary library code:
 
 - `prefscope.Lens`, `LoadedLens`, and `load_lens`;
-- `prefscope.api` contracts for representations, features, outcomes, plans, artifacts,
-  and results;
+- `prefscope.api` contracts for representations, feature matrices/batches, proposed-label
+  `FeatureCatalog` objects, outcomes, plans, artifacts, and results;
 - `AnalyzeConfig` and `run_analysis`;
 - documented functions exported from `prefscope.analysis`;
 - `TableDataset`, `HuggingFaceDataset`, `ColumnMapping`, and `prepare_dataset`.
@@ -19,6 +19,7 @@ The canonical task-centered flow is:
 
 ```text
 RepresentationSource → RepresentationBatch → Lens → FeatureBatch
+                     + FeatureCatalog → feature_activation_table
                      → AnalysisDataset → AnalysisPlan → DatasetAnalysisResult
 ```
 
@@ -43,8 +44,34 @@ These work in their documented limits but can change more quickly:
 - custom `lens_rep` artifacts beyond the built-in manifest contract;
 - unsafe representation-coordinate overrides;
 - token/ragged activation workflows and semantic-role classification;
-- `SAELensProjector`, `SAELensTextBackend`, `Lens.from_saelens(...)`, and token-first pretrained SAE inference.
-- `LensBackend`, `LensCapabilities`, `Lens.from_backend(...)`, and lens-backend YAML registry dispatch.
+- `SAELensProjector`, `SAELensTextBackend`, `Lens.from_saelens(...)`, token-first
+  pretrained SAE inference, and explicit `NeuronpediaProvider` catalog retrieval;
+- lazy-Rich `FeatureTableRenderer` terminal presentation;
+- `LensBackend`, `LensCapabilities`, `Lens.from_backend(...)`, and lens-backend YAML
+  registry dispatch;
+- Phase-1 reporting foundations: bounded durable analysis-result schema 1,
+  schema-2 `FeatureBundleReader` and eager compatibility loading, observability event
+  schema v1/JSONL, the opt-in `observe_run(...)` automatic instrumentation boundary, and
+  its optional bounded privacy-safe stderr view,
+  report bundle v3 with mandatory lineage/source references, canonical JSON-table v1,
+  and recursive typed privacy policies.
+
+These Phase-1 contracts are available and tested, but remain experimental during the
+`0.2` alpha series. Exact manifest fields, budgets, lineage hashes, privacy roles,
+section/artifact roll-up, payload preparation rules, and the set of automatically
+instrumented operations are part of the experimental contract. Event schema v1 and the
+public `observe_run(...)` entry point are versioned. Its `pretty` setting and environment
+selection are experimental presentation contracts; JSONL remains the durable contract.
+Automatic coverage does not imply that every internal function is traced. Schema/version
+changes require a changelog entry and an explicit compatibility or migration path. The
+report compiler, section planners, and renderer are not part of the current public
+surface. Viewer bundle v2 remains its separate documented contract. Publication uses
+durable staging and recovery, but overwrite is not promised as a linearizable atomic
+directory exchange.
+
+See [Durable analysis results](analysis-result.md),
+[Feature bundle reader](feature-bundle-reader.md), [Run observability](observability.md),
+and [Report bundles](report-bundle.md).
 
 ## Internal modules
 

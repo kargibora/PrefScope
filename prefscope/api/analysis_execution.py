@@ -17,6 +17,7 @@ from prefscope.api.analysis_contracts import (
 )
 from prefscope.core import registry
 from prefscope.core.features import FeatureBatch, FeatureMatrix
+from prefscope.observability.runtime import automatic_stage
 
 
 @dataclass(frozen=True, eq=False)
@@ -97,7 +98,7 @@ class DatasetAnalysisResult:
         return manifest
 
 
-def analyze_dataset(
+def _analyze_dataset_unobserved(
     features=None,
     outcomes=None,
     *,
@@ -148,3 +149,56 @@ def analyze_dataset(
             raise ValueError(f"analysis component produced duplicate {artifact.name!r}")
         artifacts[artifact.name] = artifact
     return DatasetAnalysisResult(dataset=dataset, artifacts=artifacts)
+
+
+def _analysis_completion_data(result: DatasetAnalysisResult) -> dict[str, int]:
+    """Return bounded counts without exposing analysis labels or row identities."""
+    dataset = result.dataset
+    data = {
+        "n_rows": dataset.n_rows,
+        "n_features": sum(matrix.n_features for matrix in dataset.features.values()),
+        "n_views": len(dataset.features),
+        "artifact_count": len(result.artifacts),
+    }
+    if dataset.group_ids is None:
+        data["n_groups"] = dataset.n_rows
+        return data
+
+    try:
+        groups = {(type(value), value) for value in dataset.group_ids}
+    except Exception:
+        # Completion metadata is best effort and must not change analysis behavior.
+        return data
+    data["n_groups"] = len(groups)
+    return data
+
+
+def analyze_dataset(
+    features=None,
+    outcomes=None,
+    *,
+    paired_outcomes=None,
+    group_ids=None,
+    plan: AnalysisPlan | None = None,
+) -> DatasetAnalysisResult:
+    """Run a reusable analysis plan over already computed feature matrices.
+
+    ``features`` may be one :class:`FeatureMatrix` or a named mapping. ``outcomes``
+    is a named mapping of :class:`OutcomeSpec`. Custom analyses subclass
+    :class:`AnalysisComponent` and can be passed alongside the built-ins.
+    """
+    with automatic_stage("analyze_dataset") as span:
+        result = _analyze_dataset_unobserved(
+            features,
+            outcomes,
+            paired_outcomes=paired_outcomes,
+            group_ids=group_ids,
+            plan=plan,
+        )
+        if span.active:
+            try:
+                span.update(**_analysis_completion_data(result))
+            except BaseException:
+                # Observation metadata must not alter a successful analysis.
+                pass
+        return result

@@ -1,4 +1,5 @@
 """Featurize a paired preference table with any configured Lens backend."""
+
 from __future__ import annotations
 
 import argparse
@@ -23,7 +24,10 @@ def main() -> None:
     parser.add_argument("--item-id-col", default=None)
     parser.add_argument("--group-id-col", default=None)
     parser.add_argument(
-        "--feature-id", action="append", type=int, dest="feature_ids",
+        "--feature-id",
+        action="append",
+        type=int,
+        dest="feature_ids",
         help="Retain one feature ID; repeat the option for multiple IDs.",
     )
     args = parser.parse_args()
@@ -46,7 +50,9 @@ def main() -> None:
     )
     relevance_path = Path(out).with_name(f"{Path(out).name}-preference.csv")
     relevance.to_csv(relevance_path, index=False)
-    print(f"saved {len(features.row_ids)} rows and {len(features.feature_ids)} features")
+    print(
+        f"saved {len(features.row_ids)} rows and {len(features.feature_ids)} features"
+    )
     print(f"feature bundle: {out}")
     print(f"preference analysis: {relevance_path}")
 

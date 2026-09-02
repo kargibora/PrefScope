@@ -13,7 +13,7 @@ A single, honest maturity map of what ships today.
 | Diagnosis | `diagnose`, `build-bank`, `validate-diagnosis`, `win-relevance` |
 | Python: load and encode | `Lens.load`, `Lens.from_pretrained`, `Lens.from_config`, backend-neutral `featurize`, historical `encode`/`encode_items`/`encode_pairs`, and `project_representations` |
 | Python: analyze | `analyze_dataset`, paired outcome components, prompt-conditioned change components, `normalize_outcomes`, `associate_outcomes`, and `prefscope.analysis` functions |
-| Python: data types | `RepresentationBatch`, `FeatureBatch`, `FeatureMatrix`, `OutcomeSpec`, versioned `TableContract` schemas, and aligned result artifacts |
+| Python: data types | `RepresentationBatch`, `FeatureBatch`, `FeatureMatrix`, proposed-label `FeatureCatalog`, `OutcomeSpec`, versioned `TableContract` schemas, and aligned result artifacts |
 | Extending | public `RepresentationSource`, `LensBackend`, and `AnalysisComponent`; explicit trusted plug-ins; import-driven components; public table/Hub dataset adapters |
 | Viewer | versioned static-bundle export plus the built-in Streamlit viewer; compatible external frontends can consume the JSON bundle |
 
@@ -35,6 +35,11 @@ Group-aware tests report how many independent groups support the result.
 | Custom `lens_rep` artifacts | the implementation seam is registry-backed, but schema/CLI/downstream capabilities support only difference/individual/prompt; use `RepresentationSource` to replace the vector producer |
 | Residual representation artifacts | pooled fixed-width residuals can use `PrecomputedRepresentationSource` or a custom in-memory `RepresentationSource`; versioned manifest reconstruction and token/ragged activation contracts are not built yet |
 | Third-party plug-in discovery | `prefscope run` loads an explicit trusted `plugins` module list; automatic installed-package/entry-point discovery is not built |
+| Durable analysis results | Schema-1 contracted Parquet summary directories, enforced per-table/aggregate budgets, detached `LoadedAnalysisResult`, and exact dataset reattachment are available and tested; the durable I/O contract is experimental |
+| Reporting feature source | Schema-2 `FeatureBundleReader` provides bounded live memory maps and explicit selection; schema 1 requires eager migration through `load_feature_batch`, whose fixed budgets cover all declared arrays |
+| Observability | Event schema v1 and secure JSONL recording are available for logs, not scientific results; orchestration-wide event coverage is not implied |
+| Feature presentation | `feature_activation_table` joins by selected/reordered feature IDs; `FeatureTableRenderer` provides bounded lazy-Rich/plain output; explicit Neuronpedia retrieval is external and experimental |
+| Report bundle foundation | Report v3 I/O, mandatory dataset/source/compiler/spec/sampling lineage, exact status roll-up, canonical JSON-table v1, and recursive typed privacy roles are available and experimental. Shareable Phase-1 bundles are JSON-only; overwrite has transactional recovery but is not a linearizable atomic directory exchange |
 
 ## Not built (roadmap)
 
@@ -43,6 +48,8 @@ Mentioned for scope; not shipped behavior:
 - A `diagnose-dataset` command for per-row spurious-preference detection. The low-level
   `prefscope.analysis.diagnose_dataset` function exists, but no full command or saved
   output contract ships yet.
+- The Phase-2 report compiler, automatic section planning, and HTML/static renderer.
+  No shipped browser reconstructs or recomputes report statistics from lower-level rows.
 - Feature-Conditioned Prompting — a candidate research direction.
 
 ## Building a lens: CLI or Python

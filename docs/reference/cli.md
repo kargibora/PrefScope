@@ -311,7 +311,7 @@ a valid PrefScope `analysis_state.json` ownership marker; it refuses filesystem 
 the current directory, the home directory, Git repositories, unrecognized directories,
 and directories that contain an input. Use another `--out` when in doubt. See
 the [Analyze Config Schema](analyze-config-schema.md) for every accepted key and
-[`examples/analyze-published-lenses.yaml`](../../examples/analyze-published-lenses.yaml)
+[`examples/workflows/analyze-published-lenses.yaml`](../../examples/workflows/analyze-published-lenses.yaml)
 for a runnable minimal config.
 
 ### `prepare-dataset`

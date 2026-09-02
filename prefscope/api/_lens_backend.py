@@ -115,6 +115,12 @@ def select_feature_batch(
             )
         positions = tuple(lookup[value] for value in selected_ids)
     arrays = {name: batch.array(name)[:, positions] for name in names}
+    provenance = dict(batch.provenance)
+    if "views" in provenance:
+        descriptors = provenance["views"]
+        provenance["views"] = {
+            name: descriptors[name] for name in names if name in descriptors
+        }
     return FeatureBatch(
         row_ids=batch.row_ids,
         arrays=arrays,
@@ -124,7 +130,7 @@ def select_feature_batch(
         metadata=batch.metadata,
         activation_polarity=batch.activation_polarity,
         code_semantics=batch.code_semantics,
-        provenance=batch.provenance,
+        provenance=provenance,
     )
 
 

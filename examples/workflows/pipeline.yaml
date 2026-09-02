@@ -1,4 +1,4 @@
-# Example PrefScope pipeline config — `prefscope run --config examples/pipeline.yaml`.
+# Example PrefScope pipeline config — `prefscope run --config examples/workflows/pipeline.yaml`.
 #
 # Declares the per-lens analysis chain and which swappable component runs each stage.
 # Every component is resolved by name through the registry; to switch a verifier or a

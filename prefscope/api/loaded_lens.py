@@ -19,11 +19,15 @@ analysis contract.
 
 ``LoadedLens`` remains a back-compat alias for ``Lens``.
 """
+
 from __future__ import annotations
 
+import functools
 import json
 import os  # noqa: F401  - compatibility patch point for publication tests/callers
+import re
 import warnings
+from contextvars import ContextVar
 from pathlib import Path
 
 import numpy as np
@@ -58,10 +62,174 @@ from prefscope.api._lens_publication import (
     save_lens,
 )
 from prefscope.artifacts import MANIFEST, SAE_MODEL
+from prefscope.observability.runtime import automatic_stage
+
+
+_SAFE_INPUT_REPS = {"difference", "individual", "prompt"}
+_SAFE_FEATURE_VIEWS = {"z_prompt", "z_a", "z_b", "z_diff"}
+_FEATURE_OPERATION_ACTIVE: ContextVar[bool] = ContextVar(
+    "prefscope_lens_feature_operation_active", default=False
+)
+_LOAD_LENS_ACTIVE: ContextVar[bool] = ContextVar(
+    "prefscope_lens_load_operation_active", default=False
+)
+_FETCH_LENS_ACTIVE: ContextVar[bool] = ContextVar(
+    "prefscope_lens_fetch_operation_active", default=False
+)
+
+
+def _operation_data(*, source_kind=None, input_rep=None, **booleans):
+    """Return only the small, caller-approved metadata allowlist."""
+    data = {}
+    if source_kind is not None:
+        data["source_kind"] = source_kind
+    if input_rep in _SAFE_INPUT_REPS:
+        data["input_rep"] = input_rep
+    data.update({name: bool(value) for name, value in booleans.items()})
+    return data
+
+
+def _update_lens_span(span, lens) -> None:
+    try:
+        if not span.active:
+            return
+        data = {}
+        input_rep = getattr(lens, "input_rep", None)
+        if input_rep in _SAFE_INPUT_REPS:
+            data["input_rep"] = input_rep
+        width = getattr(getattr(lens, "backend", None), "m_total", None)
+        if isinstance(width, int) and not isinstance(width, bool) and width > 0:
+            data["n_features"] = int(width)
+        span.update(**data)
+    except BaseException:
+        # Custom result properties must never turn success into failure.
+        return
+
+
+def _update_array_span(span, result) -> None:
+    try:
+        if not span.active:
+            return
+        value = result[0] if isinstance(result, tuple) else result
+        shape = getattr(value, "shape", None)
+        if shape is None:
+            return
+        dimensions = [int(size) for size in shape]
+        data = {"shape": dimensions}
+        if dimensions:
+            data["n_rows"] = dimensions[0]
+        if len(dimensions) > 1:
+            data["n_features"] = dimensions[1]
+        span.update(**data)
+    except BaseException:
+        # Structural telemetry is best effort and cannot alter return behavior.
+        return
+
+
+def _update_feature_batch_span(span, features) -> None:
+    try:
+        if not span.active:
+            return
+        arrays = getattr(features, "arrays", {})
+        views = list(arrays)
+        shapes = [[int(size) for size in arrays[name].shape] for name in views]
+        data = {
+            "n_rows": len(features.row_ids),
+            "n_features": len(features.feature_ids),
+            "n_views": len(views),
+        }
+        if all(
+            name in _SAFE_FEATURE_VIEWS
+            and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", name)
+            for name in views
+        ):
+            data.update(views=views, shapes=dict(zip(views, shapes)))
+        else:
+            # Custom array names may contain private data. Preserve only dimensions.
+            data["shapes"] = shapes
+        span.update(**data)
+    except BaseException:
+        # Structural telemetry is best effort and cannot alter return behavior.
+        return
+
+
+def _observe_lens_result(stage, *, source_kind):
+    """Instrument a constructor without inspecting its potentially private inputs."""
+
+    def decorate(function):
+        @functools.wraps(function)
+        def observed(*args, **kwargs):
+            if (
+                stage == "load_lens"
+                and _LOAD_LENS_ACTIVE.get()
+                and not _FETCH_LENS_ACTIVE.get()
+            ):
+                return function(*args, **kwargs)
+            context = (
+                _LOAD_LENS_ACTIVE
+                if stage == "load_lens"
+                else _FETCH_LENS_ACTIVE
+                if stage == "fetch_lens"
+                else None
+            )
+            token = context.set(True) if context is not None else None
+            try:
+                with automatic_stage(stage, {"source_kind": source_kind}) as span:
+                    result = function(*args, **kwargs)
+                    _update_lens_span(span, result)
+                    return result
+            finally:
+                if context is not None and token is not None:
+                    context.reset(token)
+
+        return observed
+
+    return decorate
+
+
+def _observe_feature_operation(stage, update_result):
+    """Coalesce delegates while keeping each direct public operation observable."""
+
+    def decorate(function):
+        @functools.wraps(function)
+        def observed(self, *args, **kwargs):
+            if _FEATURE_OPERATION_ACTIVE.get():
+                return function(self, *args, **kwargs)
+            token = _FEATURE_OPERATION_ACTIVE.set(True)
+            try:
+                data = _operation_data(input_rep=getattr(self, "input_rep", None))
+                with automatic_stage(stage, data) as span:
+                    result = function(self, *args, **kwargs)
+                    update_result(span, result)
+                    return result
+            finally:
+                _FEATURE_OPERATION_ACTIVE.reset(token)
+
+        return observed
+
+    return decorate
+
+
+def _observe_array_result(stage):
+    """Instrument legacy ndarray operations, coalescing their internal delegates."""
+    return _observe_feature_operation(stage, _update_array_span)
+
+
+def _observe_feature_batch_result(stage):
+    """Instrument FeatureBatch operations, coalescing their internal delegates."""
+    return _observe_feature_operation(stage, _update_feature_batch_span)
+
+
 class Lens:
     def __init__(
-        self, projector, embedder=None, *, names=None, manifest=None,
-        representation_source=None, backend=None,
+        self,
+        projector,
+        embedder=None,
+        *,
+        names=None,
+        manifest=None,
+        representation_source=None,
+        backend=None,
     ) -> None:
         """Create a lens from injected numerical components.
 
@@ -76,6 +244,7 @@ class Lens:
             raise ValueError("backend must implement LensBackend")
         if backend is not None:
             from numbers import Integral
+
             backend_width = backend.m_total
             if (
                 isinstance(backend_width, bool)
@@ -89,7 +258,9 @@ class Lens:
         if representation_source is not None and not isinstance(
             representation_source, RepresentationSource
         ):
-            raise ValueError("representation_source must implement RepresentationSource")
+            raise ValueError(
+                "representation_source must implement RepresentationSource"
+            )
         self.projector = projector
         self.embedder = embedder
         self.names = names
@@ -100,29 +271,31 @@ class Lens:
             # `.get("input_rep", "difference")` corrupted every code when a lens omitted
             # it). from_dict raises rather than guess an undeterminable representation.
             from prefscope.core.manifest import LensManifest
+
             self.manifest_obj = LensManifest.from_dict(self.manifest)
             self.input_rep = self.manifest_obj.input_rep
             self.activation_polarity = self.manifest_obj.activation_polarity
             self.code_semantics = self.manifest_obj.code_semantics
             if backend is not None:
                 comparisons = {
-                    "input_rep": (
-                        self.input_rep, getattr(backend, "input_rep", None)),
+                    "input_rep": (self.input_rep, getattr(backend, "input_rep", None)),
                     "activation_polarity": (
                         self.activation_polarity,
-                        getattr(backend, "activation_polarity", None)),
+                        getattr(backend, "activation_polarity", None),
+                    ),
                     "code_semantics": (
                         self.code_semantics,
-                        getattr(backend, "code_semantics", None)),
+                        getattr(backend, "code_semantics", None),
+                    ),
                 }
                 if self.manifest_obj.m_total is not None:
-                    comparisons["m_total"] = (
-                        self.manifest_obj.m_total, backend_width)
+                    comparisons["m_total"] = (self.manifest_obj.m_total, backend_width)
                 for field, (declared, actual) in comparisons.items():
                     if declared != actual:
                         raise ValueError(
                             f"backend manifest {field}={declared!r} conflicts with "
-                            f"backend {field}={actual!r}")
+                            f"backend {field}={actual!r}"
+                        )
         else:
             # in-memory Lens with no backing artifact — nothing to be wrong about
             self.manifest_obj = None
@@ -131,9 +304,11 @@ class Lens:
             if self.input_rep not in {"difference", "individual", "prompt"}:
                 raise ValueError(
                     "in-memory projector input_rep must be difference, individual, "
-                    "or prompt")
+                    "or prompt"
+                )
             self.activation_polarity = getattr(
-                semantic_source, "activation_polarity", "unknown")
+                semantic_source, "activation_polarity", "unknown"
+            )
             self.code_semantics = getattr(semantic_source, "code_semantics", "custom")
         if representation_source is None and embedder is not None:
             from prefscope.api.representation import EmbeddingRepresentationSource
@@ -147,26 +322,31 @@ class Lens:
         self.source = representation_source
         if backend is None:
             from prefscope.api._lens_backend import RepresentationLensBackend
+
             backend = RepresentationLensBackend(self)
         self.backend = backend
         self.granularity = self.manifest.get("granularity", "response")
-        self.lens_dir = None     # set by from_dir/load; None when constructed directly
+        self.lens_dir = None  # set by from_dir/load; None when constructed directly
 
     @classmethod
+    @_observe_lens_result("load_lens", source_kind="config")
     def from_config(cls, config, *, device: str | None = None) -> "Lens":
         """Load a native, SAELens, or registered custom backend from YAML."""
         from prefscope.api.lens_config import load_lens_config
+
         return load_lens_config(config, device=device)
 
     @classmethod
     def from_backend(cls, backend, *, names=None, manifest=None) -> "Lens":
         """Create a lens from an extensible ``PairItem -> FeatureBatch`` backend."""
         from prefscope.core.lens_backend import LensBackend
+
         if not isinstance(backend, LensBackend):
             raise ValueError("backend must implement LensBackend")
         return cls(backend, names=names, manifest=manifest, backend=backend)
 
     @classmethod
+    @_observe_lens_result("load_lens", source_kind="directory")
     def from_dir(
         cls,
         lens_dir,
@@ -187,6 +367,7 @@ class Lens:
         from prefscope.config import CONFIG
         from prefscope.encode.cache import NpyCache
         from prefscope.encode.embed import Embedder
+
         try:
             from prefscope.encode.sae import SAEProjector
         except ModuleNotFoundError as exc:
@@ -194,7 +375,8 @@ class Lens:
                 raise ImportError(
                     "Lens inference needs PyTorch; install 'prefscope[torch]' (the "
                     "'cpu' alias is retained), or install a hardware-specific PyTorch "
-                    "build before PrefScope") from exc
+                    "build before PrefScope"
+                ) from exc
             raise
         from prefscope.core.manifest import LensManifest
 
@@ -203,24 +385,30 @@ class Lens:
         model_path = lens_dir / SAE_MODEL
         missing = [str(p.name) for p in (manifest_path, model_path) if not p.is_file()]
         if missing:
-            raise FileNotFoundError(f"{lens_dir} is not a lens directory; missing {missing}")
+            raise FileNotFoundError(
+                f"{lens_dir} is not a lens directory; missing {missing}"
+            )
         manifest = json.loads(manifest_path.read_text())
         projector = SAEProjector(lens_dir, device=device)
         typed = LensManifest.from_dict(
-            manifest, strict=int(manifest.get("schema_version") or 0) >= 2)
+            manifest, strict=int(manifest.get("schema_version") or 0) >= 2
+        )
         typed.validate_projector(projector)
         if validate_arrays:
             typed.validate_arrays(lens_dir)
         input_rep = typed.input_rep
         names = _load_feature_table(
-            lens_dir, input_rep, projector.m_total, annotations=annotations)
+            lens_dir, input_rep, projector.m_total, annotations=annotations
+        )
         mid = typed.embed_model_id
         if not mid:
             raise ValueError(
                 "lens manifest does not record embed_model_id; it cannot be used for "
-                "new-text inference safely")
+                "new-text inference safely"
+            )
         unknown_preprocessing = [
-            name for name in ("max_tokens", "embed_instruction", "pooling", "normalization")
+            name
+            for name in ("max_tokens", "embed_instruction", "pooling", "normalization")
             if getattr(typed, name) is None
         ]
         if unknown_preprocessing:
@@ -230,7 +418,7 @@ class Lens:
                 "defaults, so new-text codes are not guaranteed reproducible. Rebuild "
                 "the lens to publish exact provenance.",
                 RuntimeWarning,
-                stacklevel=2,
+                stacklevel=3,  # account for the observability decorator
             )
         cache = NpyCache(embedding_cache or CONFIG.cache_dir)
         embedder = Embedder(
@@ -259,6 +447,7 @@ class Lens:
     load = from_dir
 
     @classmethod
+    @_observe_lens_result("fetch_lens", source_kind="hub")
     def from_pretrained(
         cls,
         repo_id: str,
@@ -292,8 +481,13 @@ class Lens:
             local_files_only=local_files_only,
         )
         lens_dir = download_lens(
-            repo_id, revision=resolved_revision, cache_dir=cache_dir, token=token,
-            local_files_only=local_files_only, subfolder=subfolder)
+            repo_id,
+            revision=resolved_revision,
+            cache_dir=cache_dir,
+            token=token,
+            local_files_only=local_files_only,
+            subfolder=subfolder,
+        )
         lens = cls.from_dir(
             lens_dir,
             device=device,
@@ -313,6 +507,7 @@ class Lens:
         return lens
 
     @classmethod
+    @_observe_lens_result("load_lens", source_kind="saelens")
     def from_saelens(
         cls,
         release: str,
@@ -345,7 +540,10 @@ class Lens:
         """
         from prefscope.integrations.saelens import SAELensProjector, SAELensTextBackend
 
-        if representation_source is not None and item_projection_policy != "single_token":
+        if (
+            representation_source is not None
+            and item_projection_policy != "single_token"
+        ):
             raise ValueError(
                 "representation_source requires item_projection_policy='single_token'; "
                 "use project_saelens_tokens(...) for ordinary token activations"
@@ -366,8 +564,11 @@ class Lens:
         )
         if representation_source is None:
             backend = SAELensTextBackend(
-                projector, device=device, text_batch_size=text_batch_size,
-                long_text_policy=long_text_policy, include_bos=include_bos,
+                projector,
+                device=device,
+                text_batch_size=text_batch_size,
+                long_text_policy=long_text_policy,
+                include_bos=include_bos,
             )
             lens = cls(projector, backend=backend)
         else:
@@ -418,33 +619,53 @@ class Lens:
         if config is None:
             config = TrainConfig()
 
-        forbidden = {"m_total", "k", "matryoshka_prefix", "input_rep", "sae_type",
-                     "sparsity_coef", "bandwidth", "sparsity_warmup_steps", "val_frac",
-                     "device", "embed_model_id", "max_train_rows", "dump_embeddings"}
+        forbidden = {
+            "m_total",
+            "k",
+            "matryoshka_prefix",
+            "input_rep",
+            "sae_type",
+            "sparsity_coef",
+            "bandwidth",
+            "sparsity_warmup_steps",
+            "val_frac",
+            "device",
+            "embed_model_id",
+            "max_train_rows",
+            "dump_embeddings",
+        }
         overlap = forbidden & set(config.train_kwargs)
         if overlap:
             raise ValueError(
                 f"train_kwargs may not override {sorted(overlap)}; set them via "
-                f"SAEConfig/TrainConfig fields")
+                f"SAEConfig/TrainConfig fields"
+            )
 
         battles = pairs_to_battles(data, columns=columns)
         embedder = Embedder(
-            None, device=config.device,
+            None,
+            device=config.device,
             model_revision=config.embed_model_revision,
-            **({"model_id": config.embed_model_id} if config.embed_model_id else {}))
+            **({"model_id": config.embed_model_id} if config.embed_model_id else {}),
+        )
         build_lens(
-            battles, embedder, out,
-            m_total=config.sae.m, k=config.sae.k,
+            battles,
+            embedder,
+            out,
+            m_total=config.sae.m,
+            k=config.sae.k,
             matryoshka_prefix=config.sae.matryoshka_prefix,
             input_rep=config.sae.input_rep,
             sae_type=config.sae.sae_type,
             sparsity_coef=config.sae.sparsity_coef,
             bandwidth=config.sae.bandwidth,
             sparsity_warmup_steps=config.sae.sparsity_warmup_steps,
-            val_frac=config.val_frac, device=config.device,
+            val_frac=config.val_frac,
+            device=config.device,
             embed_model_id=config.embed_model_id,
             max_train_rows=config.max_train_rows,
-            **config.train_kwargs)
+            **config.train_kwargs,
+        )
         return cls.load(out, device=config.device)
 
     @property
@@ -452,8 +673,13 @@ class Lens:
         """Return the backend's machine-readable supported feature views."""
         return self.backend.capabilities
 
+    @_observe_feature_batch_result("featurize")
     def featurize(
-        self, dataset, *, views=None, feature_ids=None,
+        self,
+        dataset,
+        *,
+        views=None,
+        feature_ids=None,
         batch_size: int | None = None,
     ):
         """Encode ``PairItem`` rows into an aligned, role-aware ``FeatureBatch``.
@@ -462,12 +688,16 @@ class Lens:
         historical ndarray return contracts.
         """
         from prefscope.api._lens_backend import (
-            normalize_items, resolve_views, select_feature_batch,
+            normalize_items,
+            resolve_views,
+            select_feature_batch,
         )
         from prefscope.core.features import FeatureBatch, validate_feature_ids
+
         items = normalize_items(dataset)
         resolved_views = resolve_views(
-            views, self.capabilities, paired=items[0].y_b is not None)
+            views, self.capabilities, paired=items[0].y_b is not None
+        )
         selected = None
         if feature_ids is not None:
             selected = validate_feature_ids(tuple(feature_ids))
@@ -476,34 +706,39 @@ class Lens:
             if min(selected) < 0 or max(selected) >= int(self.backend.m_total):
                 raise ValueError("feature_ids contain an index outside this lens")
         if batch_size is not None and (
-            isinstance(batch_size, bool) or not isinstance(batch_size, int)
+            isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
             or batch_size < 1
         ):
             raise ValueError("batch_size must be a positive integer or None")
         features = self.backend.featurize(
-            items, views=resolved_views, feature_ids=selected,
-            batch_size=batch_size)
+            items, views=resolved_views, feature_ids=selected, batch_size=batch_size
+        )
         if not isinstance(features, FeatureBatch):
             raise ValueError("lens backend featurize() must return a FeatureBatch")
         if features.row_ids != tuple(str(item.id) for item in items):
             raise ValueError(
-                "lens backend FeatureBatch row_ids must exactly match item order")
+                "lens backend FeatureBatch row_ids must exactly match item order"
+            )
         if selected is not None and features.feature_ids != selected:
             raise ValueError(
-                "lens backend feature_ids must exactly match the requested selection")
+                "lens backend feature_ids must exactly match the requested selection"
+            )
         if selected is None and features.feature_ids != tuple(
             range(int(self.backend.m_total))
         ):
             raise ValueError(
                 "unselected lens backend output must contain every feature ID in "
-                "range(m_total)")
+                "range(m_total)"
+            )
         from prefscope.core.lens_backend import pair_item_metadata
 
         canonical_metadata = pair_item_metadata(items)
         for name in set(features.metadata) & set(canonical_metadata):
             if tuple(features.metadata[name]) != tuple(canonical_metadata[name]):
                 raise ValueError(
-                    f"lens backend metadata {name!r} contradicts PairItem rows")
+                    f"lens backend metadata {name!r} contradicts PairItem rows"
+                )
         features = FeatureBatch(
             row_ids=features.row_ids,
             arrays=features.arrays,
@@ -521,14 +756,17 @@ class Lens:
             and not np.allclose(
                 features.array("z_diff"),
                 features.array("z_a") - features.array("z_b"),
-                rtol=1e-5, atol=1e-6,
+                rtol=1e-5,
+                atol=1e-6,
             )
         ):
             raise ValueError(
                 "lens backend z_diff contradicts declared A-minus-B-after-encoding "
-                "semantics")
+                "semantics"
+            )
         return select_feature_batch(
-            features, views=resolved_views, feature_ids=selected)
+            features, views=resolved_views, feature_ids=selected
+        )
 
     @property
     def fidelity_feature_ids(self):
@@ -544,10 +782,46 @@ class Lens:
         """Return one row per feature with all bundled annotation columns."""
         return inspect_feature_table(self)
 
+    @property
+    def feature_catalog(self):
+        """Return proposed display labels bound to this feature coordinate space."""
+        from prefscope.api.feature_catalog import FeatureCatalog
+
+        return FeatureCatalog.from_lens(self)
+
+    @property
+    def feature_space_identity(self) -> dict[str, str | None]:
+        model_path = (
+            Path(self.lens_dir) / SAE_MODEL if self.lens_dir is not None else None
+        )
+        if model_path is not None and model_path.is_file():
+            stat = model_path.stat()
+            cache_key = (
+                str(model_path.resolve()),
+                int(stat.st_size),
+                int(stat.st_mtime_ns),
+            )
+        else:
+            cache_key = None
+        cached = getattr(self, "_feature_space_identity_cache", None)
+        if cached is None or cached[0] != cache_key:
+            from prefscope.api._feature_space import lens_feature_space_identity
+
+            cached = (cache_key, lens_feature_space_identity(self))
+            self._feature_space_identity_cache = cached
+        return dict(cached[1])
+
+    @property
+    def feature_space_id(self) -> str | None:
+        return self.feature_space_identity["feature_space_id"]
+
+    @property
+    def feature_space_status(self) -> str:
+        return self.feature_space_identity["feature_space_status"]
+
     def presence(self, codes, *, feature_ids=None, policy: str = "calibrated"):
         """Resolve codes into concept presence under an explicit policy."""
-        return inspect_presence(
-            self, codes, feature_ids=feature_ids, policy=policy)
+        return inspect_presence(self, codes, feature_ids=feature_ids, policy=policy)
 
     @staticmethod
     def _representation_contract_fingerprint(contract) -> str:
@@ -557,13 +831,21 @@ class Lens:
         return expected_representation_contract(self)
 
     def _validate_representation_contract(
-        self, batch, *, allow_mismatch: bool,
+        self,
+        batch,
+        *,
+        allow_mismatch: bool,
     ) -> dict:
         return validate_representation_contract(
-            self, batch, allow_mismatch=allow_mismatch)
+            self, batch, allow_mismatch=allow_mismatch
+        )
 
+    @_observe_feature_batch_result("project_representations")
     def project_representations(
-        self, batch, *, allow_representation_mismatch: bool = False,
+        self,
+        batch,
+        *,
+        allow_representation_mismatch: bool = False,
     ):
         """Project an aligned representation batch through this lens."""
         return project_representations(
@@ -572,10 +854,12 @@ class Lens:
             allow_representation_mismatch=allow_representation_mismatch,
         )
 
+    @_observe_array_result("encode")
     def encode(self, prompts, completions=None) -> np.ndarray:
         """Encode prompt/response text with an individual or prompt lens."""
         return encode(self, prompts, completions)
 
+    @_observe_array_result("encode")
     def encode_one(self, prompt, completion=None) -> np.ndarray:
         """Return concept codes for one response as a one-dimensional array."""
         return encode_one(self, prompt, completion)
@@ -583,7 +867,8 @@ class Lens:
     def top_concepts(self, codes, k: int = 5, *, matching_pole_only: bool = True):
         """Return each row's strongest active named concepts."""
         return inspect_top_concepts(
-            self, codes, k=k, matching_pole_only=matching_pole_only)
+            self, codes, k=k, matching_pole_only=matching_pole_only
+        )
 
     def concept_activations(
         self,
@@ -610,10 +895,12 @@ class Lens:
             semantic_presence_only=semantic_presence_only,
         )
 
+    @_observe_array_result("encode_pairs")
     def encode_pairs(self, dataset, *, return_meta: bool = True):
         """Encode aligned response pairs and optionally return their metadata."""
         return encode_pairs(self, dataset, return_meta=return_meta)
 
+    @_observe_array_result("encode_pairs")
     def encode_items(self, dataset, *, return_meta: bool = True):
         """Encode a homogeneous iterable of paired or single-response items."""
         return encode_items(self, dataset, return_meta=return_meta)
@@ -621,39 +908,76 @@ class Lens:
     # back-compat name; encode_pairs is the canonical method
     project = encode_pairs
 
-    def save(self, dest, *, overwrite: bool = False, annotations=None,
-             inference_only: bool = False):
+    def save(
+        self,
+        dest,
+        *,
+        overwrite: bool = False,
+        annotations=None,
+        inference_only: bool = False,
+    ):
         """Publish this lens as a transactional whole-directory replacement."""
-        return save_lens(
-            self,
-            dest,
+        data = _operation_data(
+            input_rep=self.input_rep,
             overwrite=overwrite,
-            annotations=annotations,
             inference_only=inference_only,
+            has_annotations=annotations is not None,
         )
+        with automatic_stage("save_lens", data):
+            return save_lens(
+                self,
+                dest,
+                overwrite=overwrite,
+                annotations=annotations,
+                inference_only=inference_only,
+            )
 
     def diagnose(self, codes, meta, *, fidelity_only: bool = False):
         """See ``prefscope.analysis.diagnose``."""
-        return inspect_diagnose(
-            self, codes, meta, fidelity_only=fidelity_only)
+        return inspect_diagnose(self, codes, meta, fidelity_only=fidelity_only)
 
     def preference_relevance(
-        self, features, *, preference_column: str = "pref",
-        group_column: str | None = "group_id", feature_array: str = "z_diff",
+        self,
+        features,
+        *,
+        preference_column: str = "pref",
+        group_column: str | None = "group_id",
+        feature_array: str = "z_diff",
     ) -> pd.DataFrame:
         """Analyze P(A preferred) against an aligned A-minus-B feature view."""
         from prefscope.api.preference import preference_relevance
 
-        table = preference_relevance(
-            features, preference_column=preference_column,
-            group_column=group_column, feature_array=feature_array)
-        annotations = self.feature_table
-        if "concept" in annotations:
-            table = table.merge(
-                annotations[["feature_id", "concept"]].drop_duplicates("feature_id"),
-                on="feature_id", how="left",
+        data = _operation_data(
+            input_rep=self.input_rep,
+            grouped=group_column is not None,
+        )
+        with automatic_stage("analyze_preference", data) as span:
+            table = preference_relevance(
+                features,
+                preference_column=preference_column,
+                group_column=group_column,
+                feature_array=feature_array,
             )
-        return table
+            annotations = self.feature_table
+            if "concept" in annotations:
+                table = table.merge(
+                    annotations[["feature_id", "concept"]].drop_duplicates(
+                        "feature_id"
+                    ),
+                    on="feature_id",
+                    how="left",
+                )
+            if span.active:
+                try:
+                    span.update(
+                        output_rows=int(table.shape[0]),
+                        output_features=int(table["feature_id"].nunique()),
+                        shape=[int(size) for size in table.shape],
+                    )
+                except BaseException:
+                    # Result telemetry cannot alter a successful analysis.
+                    pass
+            return table
 
     def feature_preference_relevance(self, codes, meta):
         """See ``prefscope.analysis.feature_preference_relevance``."""

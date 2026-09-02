@@ -3,6 +3,7 @@
 Network downloads: GPT-2 Small, its SAE checkpoint, and optional Neuronpedia labels.
 The labels are external proposals, not PrefScope-verified semantic presence.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -51,6 +52,7 @@ def main() -> None:
     if args.top < 1:
         raise ValueError("--top must be positive")
     import torch
+
     if args.device == "cuda" and not torch.cuda.is_available():
         parser.error(
             "--device cuda needs a CUDA-enabled PyTorch build; use --device cpu "
@@ -91,8 +93,7 @@ def main() -> None:
     # Exclude BOS from the prompt summary.
     start = 1 if metadata.prepend_bos else 0
     activations = (
-        cache[str(metadata.hook_name)][0, start:]
-        .detach().float().cpu().numpy()
+        cache[str(metadata.hook_name)][0, start:].detach().float().cpu().numpy()
     )
     token_text = model.to_str_tokens(tokens)[start:]
     if len(activations) == 0:
@@ -119,7 +120,7 @@ def main() -> None:
     )
     prompt_codes = features.array("z_prompt")[0]
     token_codes = lens.projector.project(activations)
-    top = np.argsort(prompt_codes)[-args.top:][::-1]
+    top = np.argsort(prompt_codes)[-args.top :][::-1]
 
     neuronpedia_id = getattr(metadata, "neuronpedia_id", None)
     if not neuronpedia_id or "/" not in neuronpedia_id:
@@ -134,7 +135,8 @@ def main() -> None:
             continue
         token_index = int(np.argmax(token_codes[:, feature_id]))
         description, page = _explanation(
-            neuronpedia_model, neuronpedia_layer, int(feature_id))
+            neuronpedia_model, neuronpedia_layer, int(feature_id)
+        )
         print(
             f"feature={int(feature_id):5d}  activation={value:8.3f}  "
             f"top_token={token_text[token_index]!r}\n"

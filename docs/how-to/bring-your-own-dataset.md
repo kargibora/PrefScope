@@ -26,7 +26,7 @@ feature-name verification uses held-out text and does not require preference lab
 ## Recommended: one config for the complete inference workflow
 
 If the prompt and response lenses are already published, start from
-[`examples/analyze-published-lenses.yaml`](../../examples/analyze-published-lenses.yaml):
+[`examples/workflows/analyze-published-lenses.yaml`](../../examples/workflows/analyze-published-lenses.yaml):
 
 ```bash
 prefscope analyze --config analysis.yaml
