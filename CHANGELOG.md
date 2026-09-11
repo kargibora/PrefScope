@@ -6,7 +6,7 @@ the `0.x` series is an alpha API and may still evolve with explicit release note
 ## 0.3.0 — Unreleased
 
 This is a breaking change from `0.2`. Removed imports and commands have no compatibility
-aliases. Read the [migration guide](docs/how-to/migrate-from-0.2.md) before upgrading.
+aliases.
 The package version is prepared for `0.3.0`; this branch does not publish a PyPI release.
 
 - Fixed boolean top-row ranking, protected existing report directories from implicit

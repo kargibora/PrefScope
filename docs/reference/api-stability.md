@@ -1,8 +1,6 @@
 # API stability
 
 PrefScope is an alpha research library. The supported surface is intentionally narrow.
-The `0.3` API is not backward compatible with `0.2`; see the
-[migration guide](../how-to/migrate-from-0.2.md) before upgrading.
 
 ## Supported public surface
 
@@ -27,13 +25,6 @@ and legacy visualization preparation.
 
 Internal modules not imported at the package root may change without a compatibility
 shim. CLI commands for building and inspecting lenses are alpha interfaces.
-
-## Removed framework surfaces
-
-PrefScope no longer supports analysis components, analysis plans, fixed analysis-result
-schemas, config-driven analysis orchestration, report compilers, privacy policies, bundle
-readers, or run-observability wrappers. These were removed rather than retained behind
-compatibility aliases.
 
 ## Semantic guarantees
 

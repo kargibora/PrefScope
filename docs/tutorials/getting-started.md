@@ -1,7 +1,7 @@
 # Getting started
 
-For the unreleased `0.3` API, use a source checkout. A PyPI installation may still
-provide `0.2`; see the [migration guide](../how-to/migrate-from-0.2.md).
+For the unreleased `0.3` API, use a source checkout. The published PyPI package may
+have a different API.
 
 ```bash
 git clone https://github.com/kargibora/PrefScope.git

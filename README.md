@@ -1,8 +1,6 @@
 # PrefScope
 
-This branch prepares the breaking `0.3.0` alpha API. See
-[Migrate from 0.2](docs/how-to/migrate-from-0.2.md) before upgrading an existing study.
-It has not yet been published to PyPI.
+This checkout contains the unreleased `0.3.0` alpha API.
 
 PrefScope turns paired model responses into feature activations through a reusable lens.
 Its supported flow is deliberately small:

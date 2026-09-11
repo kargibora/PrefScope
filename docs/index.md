@@ -8,7 +8,6 @@ PairItem -> Lens.featurize(...) -> FeatureBatch / FeatureMatrix
 
 ## Start here
 
-- [Migrate from 0.2](how-to/migrate-from-0.2.md) — breaking API and artifact changes
 - [Getting started](tutorials/getting-started.md)
 - [Build and use a lens](how-to/build-and-analyze-a-lens.md)
 - [Bring your own dataset](how-to/bring-your-own-dataset.md)
