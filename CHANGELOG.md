@@ -3,11 +3,19 @@
 Notable user-visible changes are recorded here. PrefScope follows semantic versioning;
 the `0.x` series is an alpha API and may still evolve with explicit release notes.
 
-## 0.3.0 — Unreleased
+## 0.3.1 — Unreleased
+
+- Fixed the release test environment to install the `cluster` extra, matching CI.
+  The full test suite requires `igraph` and `leidenalg` for the clustering recipes.
+  Base package dependencies are unchanged.
+
+## 0.3.0 — 2026-09-11
+
+The GitHub release was created, but PyPI publication did not run because the release
+test environment omitted the clustering dependencies.
 
 This is a breaking change from `0.2`. Removed imports and commands have no compatibility
 aliases.
-The package version is prepared for `0.3.0`; this branch does not publish a PyPI release.
 
 - Fixed boolean top-row ranking, protected existing report directories from implicit
   replacement, and used unique temporary files for catalog writes.

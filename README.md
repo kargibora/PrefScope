@@ -1,6 +1,6 @@
 # PrefScope
 
-This checkout contains the unreleased `0.3.0` alpha API.
+This checkout contains the `0.3` alpha API.
 
 PrefScope turns paired model responses into feature activations through a reusable lens.
 Its supported flow is deliberately small:

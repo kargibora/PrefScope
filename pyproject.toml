@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prefscope"
-version = "0.3.0"
+version = "0.3.1"
 description = "Backend-neutral feature extraction and numerical tools for post-training research."
 license = { text = "MIT" }
 authors = [{ name = "Bora Kargı" }]
