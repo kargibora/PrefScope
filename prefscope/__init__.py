@@ -46,7 +46,7 @@ from prefscope.analysis import (
 )
 from prefscope.reporting import Report
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # Library convention: emit logs under the ``prefscope`` namespace but stay silent
 # unless the application attaches a handler / configures logging.
