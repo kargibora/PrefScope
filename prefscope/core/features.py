@@ -131,55 +131,6 @@ class FeatureMatrix:
         object.__setattr__(
             self, "provenance", validate_portable_mapping(self.provenance, where="provenance"))
 
-    @classmethod
-    def from_presence(
-        cls,
-        presence,
-        *,
-        row_ids,
-        role: str,
-        metadata=None,
-        provenance=None,
-    ) -> "FeatureMatrix":
-        """Build an explicitly semantic-presence matrix from ``concept_presence``.
-
-        Raw nonzero activations must not use this constructor. ``presence`` is
-        expected to expose aligned boolean ``values``, ``feature_ids``, and
-        per-feature ``basis`` fields, as returned by PrefScope's PresenceMatrix.
-        """
-        values = np.asarray(getattr(presence, "values", None))
-        raw_feature_ids = tuple(getattr(presence, "feature_ids", ()))
-        basis = tuple(str(value) for value in getattr(presence, "basis", ()))
-        calibrated = np.asarray(getattr(presence, "calibrated", ()), dtype=bool)
-        if values.ndim != 2 or values.dtype != bool:
-            raise ValueError("presence must expose a 2-D boolean values matrix")
-        feature_ids = validate_feature_ids(raw_feature_ids, width=values.shape[1])
-        if (
-            len(feature_ids) != values.shape[1]
-            or len(basis) != values.shape[1]
-            or len(calibrated) != values.shape[1]
-        ):
-            raise ValueError(
-                "presence feature_ids/basis/calibrated must match its feature width")
-        if not calibrated.all() or any(value != "semantic_threshold" for value in basis):
-            raise ValueError(
-                "semantic FeatureMatrix conversion requires calibrated "
-                "semantic_threshold presence for every feature")
-        return cls(
-            values=values,
-            row_ids=tuple(row_ids),
-            role=role,
-            orientation="none",
-            feature_ids=feature_ids,
-            metadata=dict(metadata or {}),
-            activation_polarity="nonnegative",
-            code_semantics="semantic_presence",
-            provenance={
-                **dict(provenance or {}),
-                "presence_basis": list(basis),
-            },
-        )
-
     @property
     def n_rows(self) -> int:
         return int(self.values.shape[0])

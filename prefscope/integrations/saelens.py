@@ -18,7 +18,7 @@ from typing import Mapping
 
 import numpy as np
 
-from prefscope.core.lens_backend import LensBackend, LensCapabilities
+from prefscope.core.lens_backend import LensBackend, LensCapabilities, pair_item_metadata
 from prefscope.core.representation import validate_portable_mapping, validate_row_ids
 
 
@@ -83,6 +83,66 @@ def _torch_module():
     return torch
 
 
+def _digest_frame(digest, value) -> None:
+    view = memoryview(value).cast("B")
+    digest.update(view.nbytes.to_bytes(8, "big"))
+    digest.update(view)
+
+
+def _normalize_sha256(value: str | None, *, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} must be a 64-character SHA-256 hex digest or None")
+    normalized = value.removeprefix("sha256:").casefold()
+    if re.fullmatch(r"[0-9a-f]{64}", normalized) is None:
+        raise ValueError(f"{name} must be a 64-character SHA-256 hex digest or None")
+    return normalized
+
+
+def _loaded_state_dict_sha256(sae) -> str | None:
+    """Return a canonical digest of the operative tensor and buffer state."""
+    state_dict_fn = getattr(sae, "state_dict", None)
+    if not callable(state_dict_fn):
+        return None
+    state = state_dict_fn()
+    if not isinstance(state, Mapping) or not state:
+        return None
+    digest = hashlib.sha256()
+    _digest_frame(digest, b"prefscope-saelens-state-v1")
+    for key in sorted(state):
+        if not isinstance(key, str) or not key:
+            return None
+        value = state[key]
+        if isinstance(value, np.ndarray):
+            array = np.ascontiguousarray(value)
+            if array.dtype.hasobject:
+                return None
+            dtype = array.dtype.str
+            shape = tuple(int(size) for size in array.shape)
+            raw = array
+        else:
+            detach = getattr(value, "detach", None)
+            if not callable(detach) or bool(getattr(value, "is_sparse", False)):
+                return None
+            tensor = detach().cpu().contiguous()
+            shape = tuple(int(size) for size in tensor.shape)
+            dtype = str(tensor.dtype).removeprefix("torch.")
+            try:
+                torch = _torch_module()
+                raw = tensor.reshape(-1).view(torch.uint8).numpy()
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                return None
+        _digest_frame(digest, key.encode("utf-8"))
+        _digest_frame(digest, dtype.encode("ascii"))
+        _digest_frame(
+            digest,
+            b"".join(size.to_bytes(8, "big", signed=True) for size in shape),
+        )
+        _digest_frame(digest, raw)
+    return digest.hexdigest()
+
+
 class SAELensProjector:
     """Adapt one loaded SAELens SAE to PrefScope's frozen projector protocol.
 
@@ -107,6 +167,7 @@ class SAELensProjector:
         max_output_bytes: int = 256 * 1024 * 1024,
         activation_polarity: str | None = None,
         reader_model_revision: str | None = None,
+        expected_sae_weights_sha256: str | None = None,
         item_projection_policy: str = "forbid",
         representation_contract: Mapping[str, object] | None = None,
     ) -> None:
@@ -143,6 +204,9 @@ class SAELensProjector:
         ):
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"{name} must be a non-empty string or None")
+        expected_sae_weights_sha256 = _normalize_sha256(
+            expected_sae_weights_sha256, name="expected_sae_weights_sha256"
+        )
 
         d_in = _value(cfg, "d_in")
         d_sae = _value(cfg, "d_sae")
@@ -357,6 +421,15 @@ class SAELensProjector:
             version = importlib_metadata.version("sae-lens")
         except importlib_metadata.PackageNotFoundError:
             version = None
+        parameters_fn = getattr(self.sae, "parameters", None)
+        if callable(parameters_fn):
+            for parameter in parameters_fn():
+                requires_grad_fn = getattr(parameter, "requires_grad_", None)
+                if callable(requires_grad_fn):
+                    requires_grad_fn(False)
+        eval_fn = getattr(self.sae, "eval", None)
+        if callable(eval_fn):
+            eval_fn()
         cfg_dict = (
             cfg.to_dict()
             if callable(getattr(cfg, "to_dict", None))
@@ -366,13 +439,78 @@ class SAELensProjector:
                 "d_sae": self.m_total,
             }
         )
+        portable_cfg = _json_value(cfg_dict)
         cfg_payload = json.dumps(
-            _json_value(cfg_dict),
+            portable_cfg,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         ).encode("utf-8")
         config_fingerprint = hashlib.sha256(cfg_payload).hexdigest()
+        coordinate_cfg = dict(portable_cfg) if isinstance(portable_cfg, Mapping) else {}
+        for operational_key in ("device", "dtype", "metadata"):
+            coordinate_cfg.pop(operational_key, None)
+        coordinate_cfg["implementation"] = {
+            "class": f"{type(sae).__module__}.{type(sae).__qualname__}",
+            "saelens_version": version,
+        }
+        coordinate_metadata = {
+            key: _json_value(value)
+            for key in (
+                "model_name",
+                "hook_name",
+                "hook_head_index",
+                "model_class_name",
+                "model_from_pretrained_kwargs",
+            )
+            if (value := _value(metadata, key)) is not None
+        }
+        if coordinate_metadata:
+            coordinate_cfg["coordinate_metadata"] = coordinate_metadata
+        reader_coordinate = {
+            key: contract[key]
+            for key in (
+                "model_id",
+                "model_revision",
+                "hook_name",
+                "hook_layer",
+                "hook_head_index",
+                "source_activation_preprocessing",
+                "sae_input_normalization",
+                "activation_reshape",
+                "model_from_pretrained_kwargs",
+            )
+            if key in contract
+        }
+        if reader_coordinate:
+            coordinate_cfg["reader_coordinate"] = reader_coordinate
+        coordinate_cfg_payload = json.dumps(
+            coordinate_cfg,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        coordinate_config_fingerprint = hashlib.sha256(
+            coordinate_cfg_payload
+        ).hexdigest()
+        weights_sha256 = _loaded_state_dict_sha256(sae)
+        if expected_sae_weights_sha256 is not None:
+            if weights_sha256 is None:
+                raise ValueError(
+                    "expected_sae_weights_sha256 cannot be verified because the loaded "
+                    "SAE has no digestible non-empty state_dict"
+                )
+            if weights_sha256 != expected_sae_weights_sha256:
+                raise ValueError(
+                    "loaded SAELens SAE state does not match "
+                    "expected_sae_weights_sha256: "
+                    f"expected {expected_sae_weights_sha256}, observed {weights_sha256}"
+                )
+            acquisition_status = "expected_digest_verified"
+        elif weights_sha256 is not None:
+            acquisition_status = "observed_loaded_state"
+        else:
+            acquisition_status = "unverified_loaded_state"
         self.projector_provenance = {
             key: value
             for key, value in {
@@ -384,21 +522,16 @@ class SAELensProjector:
                 "d_in": self.input_dim,
                 "d_sae": self.m_total,
                 "coordinate_pin_status": self.coordinate_pin_status,
+                "reader_identity_status": "declared_unpinned",
+                "sae_acquisition_status": acquisition_status,
+                "sae_weights_sha256": weights_sha256,
                 "sae_config_fingerprint": config_fingerprint,
+                "sae_coordinate_config_fingerprint": coordinate_config_fingerprint,
                 "item_projection_policy": item_projection_policy,
                 "representation_contract": contract,
             }.items()
             if value is not None
         }
-        parameters_fn = getattr(self.sae, "parameters", None)
-        if callable(parameters_fn):
-            for parameter in parameters_fn():
-                requires_grad_fn = getattr(parameter, "requires_grad_", None)
-                if callable(requires_grad_fn):
-                    requires_grad_fn(False)
-        eval_fn = getattr(self.sae, "eval", None)
-        if callable(eval_fn):
-            eval_fn()
 
     @classmethod
     def from_pretrained(
@@ -414,6 +547,7 @@ class SAELensProjector:
         max_output_bytes: int = 256 * 1024 * 1024,
         activation_polarity: str | None = None,
         reader_model_revision: str | None = None,
+        expected_sae_weights_sha256: str | None = None,
         item_projection_policy: str = "forbid",
         allow_unregistered_release: bool = False,
     ) -> "SAELensProjector":
@@ -424,6 +558,9 @@ class SAELensProjector:
             raise ValueError("sae_id must be a non-empty string")
         if not isinstance(allow_unregistered_release, bool):
             raise ValueError("allow_unregistered_release must be boolean")
+        expected_sae_weights_sha256 = _normalize_sha256(
+            expected_sae_weights_sha256, name="expected_sae_weights_sha256"
+        )
         try:
             from sae_lens import SAE
             from sae_lens.loading.pretrained_saes_directory import (
@@ -457,6 +594,7 @@ class SAELensProjector:
             max_output_bytes=max_output_bytes,
             activation_polarity=activation_polarity,
             reader_model_revision=reader_model_revision,
+            expected_sae_weights_sha256=expected_sae_weights_sha256,
             item_projection_policy=item_projection_policy,
         )
 
@@ -691,6 +829,14 @@ class SAELensTextBackend(LensBackend):
     @property
     def code_semantics(self) -> str:
         return self.projector.code_semantics
+
+    @property
+    def feature_space_identity(self) -> dict[str, str | None]:
+        from prefscope.api._feature_space import projector_feature_space_identity
+
+        return projector_feature_space_identity(
+            self.projector, input_rep=self.input_rep, backend="saelens"
+        )
 
     def _metadata_value(self, name, default=None):
         cfg = getattr(self.projector.sae, "cfg", None)
@@ -928,54 +1074,6 @@ class SAELensTextBackend(LensBackend):
             chunks.append(chunk)
         return np.concatenate(chunks, axis=0)
 
-    @staticmethod
-    def _item_metadata(items) -> dict[str, tuple[object, ...]]:
-        reserved = {
-            "prompt",
-            "response_a",
-            "response_b",
-            "pref",
-            "model_a",
-            "model_b",
-            "response_length_a",
-            "response_length_b",
-            "response_length_difference",
-        }
-        custom = set()
-        for item in items:
-            if not isinstance(item.meta, dict):
-                raise ValueError("PairItem.meta must be a mapping")
-            collisions = reserved & set(item.meta)
-            if collisions:
-                raise ValueError(
-                    f"PairItem.meta collides with canonical fields: {sorted(collisions)}"
-                )
-            custom.update(item.meta)
-        lengths_a = tuple(len(str(item.y_a).split()) for item in items)
-        lengths_b = tuple(
-            None if item.y_b is None else len(str(item.y_b).split()) for item in items
-        )
-        metadata = {
-            "prompt": tuple(str(item.x) for item in items),
-            "response_a": tuple(str(item.y_a) for item in items),
-            "response_b": tuple(item.y_b for item in items),
-            "pref": tuple(item.pref for item in items),
-            "model_a": tuple(item.model_a for item in items),
-            "model_b": tuple(item.model_b for item in items),
-            "response_length_a": lengths_a,
-            "response_length_b": lengths_b,
-            "response_length_difference": tuple(
-                None if b is None else a - b for a, b in zip(lengths_a, lengths_b)
-            ),
-        }
-        metadata.update(
-            {
-                name: tuple(item.meta.get(name) for item in items)
-                for name in sorted(custom)
-            }
-        )
-        return metadata
-
     def featurize(
         self,
         items,
@@ -1080,7 +1178,7 @@ class SAELensTextBackend(LensBackend):
             roles={name: roles[name] for name in arrays},
             orientations={name: orientations[name] for name in arrays},
             feature_ids=selected,
-            metadata=self._item_metadata(rows),
+            metadata=pair_item_metadata(rows),
             activation_polarity=self.activation_polarity,
             code_semantics=self.code_semantics,
             provenance={

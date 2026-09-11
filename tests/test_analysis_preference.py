@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.analysis import evaluate_preference
+from prefscope.recipes.analysis.preference import evaluate_preference
 
 
 def _signal_dataset(n=240, m=5, seed=0):

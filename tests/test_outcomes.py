@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.analysis.outcomes import (
+from prefscope.recipes.analysis.outcomes import (
     NormalizedOutcomes,
     OutcomeAssociationResult,
     associate_outcomes,
@@ -181,18 +181,6 @@ def test_normalized_outcome_contract_rejects_mismatched_missing_mask():
             center=np.asarray([0.0]),
             scale=np.asarray([1.0]),
         )
-
-
-def test_outcome_contract_is_exported_from_analysis_namespace():
-    from prefscope.analysis import (
-        NormalizedOutcomes as ExportedOutcomes,
-        associate_outcomes as exported_associate,
-        normalize_outcomes as exported_normalize,
-    )
-
-    assert ExportedOutcomes is NormalizedOutcomes
-    assert exported_associate is associate_outcomes
-    assert exported_normalize is normalize_outcomes
 
 
 def test_outcome_inference_is_withheld_for_thin_perfect_binary_cell():

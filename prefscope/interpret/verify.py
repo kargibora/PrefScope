@@ -137,8 +137,7 @@ def verify_single_text_features(texts, z, names: pd.DataFrame, client, *,
     the LLM's Yes/No. A feature passes if correlation >= threshold AND the
     Bonferroni-adjusted p < 0.05. ``random-active`` samples uniformly from the
     positive held-out pool; ``quantile-stratified`` covers weak through strong
-    activations. The legacy ``stratified-random`` spelling aliases
-    ``random-active``. ``n_examples`` is a total budget split across buckets.
+    activations. ``n_examples`` is a total budget split across buckets.
     """
     sampling = normalize_verification_sampling(sampling)
     if n_examples is not None:

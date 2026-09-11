@@ -1,7 +1,59 @@
 # Changelog
 
 Notable user-visible changes are recorded here. PrefScope follows semantic versioning;
-the `0.2` series is an alpha API and may still evolve with explicit release notes.
+the `0.x` series is an alpha API and may still evolve with explicit release notes.
+
+## 0.3.0 — Unreleased
+
+This is a breaking change from `0.2`. Removed imports and commands have no compatibility
+aliases. Read the [migration guide](docs/how-to/migrate-from-0.2.md) before upgrading.
+The package version is prepared for `0.3.0`; this branch does not publish a PyPI release.
+
+- Fixed boolean top-row ranking, protected existing report directories from implicit
+  replacement, and used unique temporary files for catalog writes.
+- Bound loaded native feature identity to the loaded weights and whitener. Publishing
+  refuses backing files that changed after loading instead of assigning them the old
+  lens identity.
+- Fixed prompt naming with battle-ID-only metadata and retained prompt-group splits.
+  Removed stale interpretation help and unused dispatch code.
+- Fixed the UMAP example to select real A/B views from normal individual-lens batches
+  without mixing their derived difference into the answer map. Added offline example
+  coverage in CI.
+- Removed duplicate metadata assembly and unnecessary feature-array copies without
+  changing row order, feature selection, or orientation checks.
+
+- Native representation lenses now reject an unsupported per-call `batch_size`
+  instead of ignoring it. Configure native embedding batches with `embed_batch_size`
+  when loading the lens. Documented backend batching and the single `featurize` entry
+  point; no analysis or reporting API was added.
+
+- Added a caller-owned prompt-taxonomy example with signed feature identities,
+  deterministic evidence, auditable CSV output and resumable OpenRouter runs.
+  It does not validate feature names or expand the core catalog schema.
+
+- Replaced the analysis-component, fixed-schema, and automatic orchestration layers with
+  direct numerical functions over `FeatureMatrix`.
+- Added a caller-owned `Report` container for finite numerical metrics, pandas tables,
+  and JSON metadata. The report compiler, privacy policy, lineage schema, and
+  observability layers from the unmerged reporting branch are not part of this API.
+- Moved specialized preference, outcome, context, graph, cluster, pipeline, and historical
+  viewer-preparation code to unexported `prefscope.recipes` modules.
+- Removed analysis/report/workflow CLI commands and the observability event framework
+  without compatibility shims.
+- Added separate `FeatureCatalog` annotations, explicit feature-ID joins, simple JSON
+  catalog persistence, and feature-space identity checks. Native lens publication
+  bundles the catalog without inventing names for unnamed features.
+- Simplified saved `FeatureBatch` directories to ordinary local artifacts. Old encoded
+  and reporting-development bundle readers are not retained.
+- Added expected loaded-SAE-state digest checks for SAELens. Reader identity and remote
+  checkpoint acquisition remain explicitly unpinned.
+- Reorganized examples by task, with plain or Rich feature tables and explicit
+  Neuronpedia annotations. Model and live-service examples remain opt-in.
+- Reduced `prefscope.viewer_export` to a serializer for existing feature data,
+  annotations, and caller-provided tables. It now requires an explicit compatible built
+  Viewer and packages a new static-site directory with deterministic hashes. It refuses
+  to overwrite an existing destination and does not build the Viewer or run
+  analysis/report orchestration.
 
 ## 0.2.0 — 2026-09-01
 
@@ -10,63 +62,6 @@ the `0.2` series is an alpha API and may still evolve with explicit release note
   local credential ignores; and shipped the upstream WIMHF MIT notice with adapted
   prompt templates.
 
-- Added the experimental Phase-1 reporting foundation. Contracted task-centered summary
-  results now publish under per-table and aggregate budgets, load as detached
-  `LoadedAnalysisResult` tables, and reattach only to an exactly matching dataset.
-  Schema-2 `FeatureBundleReader` provides validated live read-only memory maps, bounded
-  Parquet/NPY preflight, chunking, and explicit row/view selection. Schema-1 bundles use
-  the explicit eager `load_feature_batch` compatibility and migration path, with fixed
-  budgets over every declared array.
-- Added observability event schema v1, secure bounded JSONL recording, and opt-in
-  automatic events for supported Lens and durable-artifact operations. `observe_run(...)`
-  activates context-local spans; `PREFSCOPE_EVENTS_PATH` activates a process-local
-  recorder lazily on first instrumented use. `observe_run(..., pretty=True)` and the
-  zero-code `PREFSCOPE_EVENTS_PRETTY=1` setting add bounded privacy-safe progress lines on
-  stderr after successful persistence, with colored interactive Rich rendering and a
-  plain-text fallback. The normal `examples/advanced/presentations/compare_completions.py` flow compares
-  two completions in colored raw-activation tables without manual event calls.
-  `pretty=None` consults the environment, while `pretty=False` overrides it;
-  the pretty setting alone does not activate logging. With neither recording opt-in,
-  observability performs no file writes. Automatic events carry correlation/timing and
-  safe structural fields; omit raw text, paths, caller IDs, payloads, and exception
-  messages; and bridge
-  PrefScope logs and emitted warnings within their documented limits. Also added strict
-  report bundle v3
-  I/O rooted at manifest-last `bundle_manifest.json`. V3 requires
-  exact dataset/source/compiler/spec/sampling-frame lineage and artifact source references,
-  enforces section/artifact status and evidence roll-up, and distinguishes raw
-  `json_payload` sanitation from already-sanitized object/table payloads. Canonical
-  JSON-table v1 and recursive typed local/shareable privacy roles fail closed on unknown
-  shareable fields, direct email/phone literals, secrets, and small cells. Phase-1
-  shareable artifacts are JSON-only. Publication uses persistent advisory lock files,
-  rejects untrusted parents and non-owned/multi-link lock inodes before mutation, imports
-  Unix locking lazily, uses no-replace new installs on Darwin/Linux, and retains
-  recoverable staging; overwrite is not a
-  linearizable atomic directory exchange. Viewer bundle v2 is unchanged. A report
-  compiler and renderer remain Phase-2 work; browsers do not recompute scientific results.
-
-- Added a Torch-free `FeatureCatalog` proposed-label artifact, exact/declared
-  feature-space identity, selected/reordered-ID-safe `feature_activation_table(...)`, an
-  explicit provenance-bearing `NeuronpediaProvider`, and bounded lazy-Rich/plain
-  `FeatureTableRenderer`. `Lens.feature_catalog` exposes native names without copying
-  annotations into numerical `FeatureBatch` objects. Existing `feature_table`,
-  `concept_names`, and ndarray `concept_activations(...)` contracts remain; the latter now
-  also accepts `FeatureMatrix` and joins annotations by feature ID. Live `ReportDataset`
-  accepts typed catalogs while retaining DataFrame compatibility.
-
-- Reorganized source-checkout examples into a self-contained capability gallery for
-  inference, training, analysis, workflows, assets, and advanced demonstrations. Basic
-  cards use editable constants instead of argument-heavy mini-CLIs, stay under 80 lines,
-  wrap public operations in pretty observability, and print compact results. The
-  single-response SAELens card prints top codes with matching Neuronpedia descriptions.
-  The Hub dataset revision is optional, with exact commits recommended for reproducibility.
-  Feature-batch semantics now fail closed, and selected-view provenance is pruned so every
-  successfully published schema-2 bundle has matching eager/lazy reader contracts.
-  The completion-comparison example also keeps event logging opt-in, bounds displayed rows,
-  and suppresses inactive zero features. A separate local multi-row inspection card joins
-  selected codes to proposed descriptions without changing the numerical bundle example;
-  the feature-table renderer adds bounded `row_id` and `rank` columns when multiple rows
-  are visible.
 - Added the backend-neutral `Lens.featurize(...) -> FeatureBatch` contract with declared
   `LensCapabilities`, a public `LensBackend` extension point, strict lens YAML loading,
   direct typed analysis input, transactional `save_feature_batch(...)`, and grouped

@@ -27,6 +27,7 @@ CORPUS_COLS = ["battle_id", "source", "language"] + CONTENT_COLS
 LOAD_REQUIRED_COLS = ["prompt", "completion_a"]
 # Optional columns carried through when present (e.g. human preference labels).
 # y = P(A preferred): model_a wins -> 1.0, model_b -> 0.0, tie -> 0.5.
+IDENTITY_COLS = ["instruction_id", "group_id"]
 OPTIONAL_COLS = ["human_pref"]
 
 
@@ -58,7 +59,7 @@ def normalize(df: pd.DataFrame, source: str) -> pd.DataFrame:
     if "battle_id" not in out.columns:
         out["battle_id"] = [make_battle_id(r) for r in out[CONTENT_COLS].to_dict("records")]
     out["language"] = out["language"].fillna("")
-    keep = CORPUS_COLS + [c for c in OPTIONAL_COLS if c in out.columns]
+    keep = CORPUS_COLS + [c for c in IDENTITY_COLS + OPTIONAL_COLS if c in out.columns]
     return out[keep].reset_index(drop=True)
 
 
@@ -73,7 +74,7 @@ def merge_corpora(frames) -> pd.DataFrame:
 
 def write_corpus(df: pd.DataFrame, path) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    cols = CORPUS_COLS + [c for c in OPTIONAL_COLS if c in df.columns]
+    cols = CORPUS_COLS + [c for c in IDENTITY_COLS + OPTIONAL_COLS if c in df.columns]
     df[cols].to_parquet(path, index=False)
 
 
@@ -105,9 +106,11 @@ def load_corpus(path) -> pd.DataFrame:
         df[col] = df[col].astype("string").fillna("") if col in df.columns else ""
     if "battle_id" not in df.columns:
         df["battle_id"] = _synthesize_battle_ids(df)
-    df["instruction_id"] = df["battle_id"]
-    df["group_id"] = [
-        hashlib.sha1(str(prompt).encode("utf-8")).hexdigest()[:16]
-        for prompt in df["prompt"]
-    ]
+    if "instruction_id" not in df.columns:
+        df["instruction_id"] = df["battle_id"]
+    if "group_id" not in df.columns:
+        df["group_id"] = [
+            hashlib.sha1(str(prompt).encode("utf-8")).hexdigest()[:16]
+            for prompt in df["prompt"]
+        ]
     return df

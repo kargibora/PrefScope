@@ -80,7 +80,7 @@ def test_verify_stratified_random_respects_total_example_budget():
     names = pd.DataFrame({"feature_id": [0], "concept": ["concept0"]})
     out = verify_features(
         _battles(n), z, names, SignClient(z), verify_frac=1.0, seed=0,
-        sampling="stratified-random", n_examples=31)
+        sampling="random-active", n_examples=31)
     row = out.iloc[0]
     assert row["n_attempted"] == 31
     assert row["n_pos_ok"] == 11 and row["n_neg_ok"] == 10

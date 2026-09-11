@@ -1,7 +1,7 @@
 """conditional_win_relevance: the prompt-type × behavior interaction δ_{f,k} (sign-flips)."""
 import numpy as np
 
-from prefscope.pipeline.winrelevance import conditional_win_relevance
+from prefscope.recipes.pipeline.winrelevance import conditional_win_relevance
 
 
 def test_conditional_win_relevance_captures_sign_flip():

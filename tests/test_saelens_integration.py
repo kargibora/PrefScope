@@ -9,7 +9,8 @@ import types
 import numpy as np
 import pytest
 
-from prefscope import Lens, PairItem, RepresentationBatch
+from prefscope import Lens, PairItem, PrecomputedRepresentationSource, RepresentationBatch
+from prefscope.api._feature_space import projector_feature_space_identity
 from prefscope.integrations import saelens as integration
 from prefscope.integrations.saelens import SAELensProjector
 
@@ -85,6 +86,19 @@ class FakeSAE:
         return FakeTensor(np.maximum(values[:, : self.cfg.d_sae], 0.0))
 
 
+class StatefulFakeSAE(FakeSAE):
+    def __init__(self, *, offset: float = 0.0, reverse: bool = False):
+        super().__init__()
+        entries = [
+            ("W_dec", np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)),
+            ("b_enc", np.array([offset, 0.0], dtype=np.float32)),
+        ]
+        self._state = dict(reversed(entries) if reverse else entries)
+
+    def state_dict(self):
+        return dict(self._state)
+
+
 def _projector(monkeypatch, **kwargs):
     monkeypatch.setattr(integration, "_torch_module", lambda: FakeTorch)
     return SAELensProjector(
@@ -142,6 +156,157 @@ def test_projector_wraps_saelens_encode_and_records_coordinate_contract(monkeypa
         "reader_and_sae_unpinned"
     )
     assert len(projector.projector_provenance["sae_config_fingerprint"]) == 64
+    assert projector.projector_provenance["sae_acquisition_status"] == (
+        "unverified_loaded_state"
+    )
+    assert projector.projector_provenance["reader_identity_status"] == (
+        "declared_unpinned"
+    )
+
+
+def test_loaded_saelens_state_has_exact_coordinate_only_identity():
+    first = SAELensProjector(
+        StatefulFakeSAE(),
+        release="release-alias-a",
+        sae_id="sae-alias-a",
+        reader_model_revision="reader-a",
+    )
+    reordered = SAELensProjector(
+        StatefulFakeSAE(reverse=True),
+        release="release-alias-b",
+        sae_id="sae-alias-b",
+        reader_model_revision="reader-a",
+    )
+    changed_reader = SAELensProjector(
+        StatefulFakeSAE(), reader_model_revision="reader-b"
+    )
+    changed = SAELensProjector(StatefulFakeSAE(offset=1.0))
+
+    class AlternateStatefulFakeSAE(StatefulFakeSAE):
+        pass
+
+    changed_implementation = SAELensProjector(AlternateStatefulFakeSAE())
+    changed_dtype_sae = StatefulFakeSAE()
+    changed_dtype_sae._state["b_enc"] = changed_dtype_sae._state["b_enc"].astype(
+        np.float64
+    )
+    changed_dtype = SAELensProjector(changed_dtype_sae)
+    changed_shape_sae = StatefulFakeSAE()
+    changed_shape_sae._state["b_enc"] = changed_shape_sae._state["b_enc"].reshape(2, 1)
+    changed_shape = SAELensProjector(changed_shape_sae)
+
+    first_identity = projector_feature_space_identity(
+        first, input_rep="individual", backend="saelens"
+    )
+    reordered_identity = projector_feature_space_identity(
+        reordered, input_rep="prompt", backend="saelens"
+    )
+    changed_reader_identity = projector_feature_space_identity(
+        changed_reader, input_rep="individual", backend="saelens"
+    )
+    changed_identity = projector_feature_space_identity(
+        changed, input_rep="individual", backend="saelens"
+    )
+    changed_implementation_identity = projector_feature_space_identity(
+        changed_implementation, input_rep="individual", backend="saelens"
+    )
+    changed_dtype_identity = projector_feature_space_identity(
+        changed_dtype, input_rep="individual", backend="saelens"
+    )
+    changed_shape_identity = projector_feature_space_identity(
+        changed_shape, input_rep="individual", backend="saelens"
+    )
+
+    assert first.projector_provenance["sae_acquisition_status"] == (
+        "observed_loaded_state"
+    )
+    assert first.projector_provenance["reader_identity_status"] == (
+        "declared_unpinned"
+    )
+    assert first_identity["feature_space_status"] == "exact_weights"
+    assert reordered_identity == first_identity
+    assert changed_reader_identity["feature_space_id"] != first_identity["feature_space_id"]
+    assert changed_identity["feature_space_id"] != first_identity["feature_space_id"]
+    assert changed_implementation_identity["feature_space_id"] != (
+        first_identity["feature_space_id"]
+    )
+    assert changed_dtype_identity["feature_space_id"] != first_identity["feature_space_id"]
+    assert changed_shape_identity["feature_space_id"] != first_identity["feature_space_id"]
+
+
+def test_saelens_feature_identity_includes_declared_model_and_hook(monkeypatch):
+    first = SAELensProjector(StatefulFakeSAE())
+    monkeypatch.setattr(FakeMetadata, "hook_name", "blocks.4.hook_resid_pre")
+    second = SAELensProjector(StatefulFakeSAE())
+
+    first_identity = projector_feature_space_identity(
+        first, input_rep="individual", backend="saelens"
+    )
+    second_identity = projector_feature_space_identity(
+        second, input_rep="individual", backend="saelens"
+    )
+    assert first.projector_provenance["sae_weights_sha256"] == (
+        second.projector_provenance["sae_weights_sha256"]
+    )
+    assert first_identity["feature_space_id"] != second_identity["feature_space_id"]
+
+
+def test_expected_saelens_weights_digest_verifies_or_fails_closed():
+    observed = SAELensProjector(StatefulFakeSAE())
+    expected = observed.projector_provenance["sae_weights_sha256"]
+    lens = Lens.__new__(Lens)
+    lens.projector = observed
+    assert lens.sae_weights_sha256 == expected
+    assert lens.sae_acquisition_status == "observed_loaded_state"
+
+    verified = SAELensProjector(
+        StatefulFakeSAE(), expected_sae_weights_sha256=f"sha256:{expected.upper()}"
+    )
+    assert verified.projector_provenance["sae_acquisition_status"] == (
+        "expected_digest_verified"
+    )
+    with pytest.raises(ValueError, match="does not match.*expected.*observed"):
+        SAELensProjector(
+            StatefulFakeSAE(), expected_sae_weights_sha256="0" * 64
+        )
+    with pytest.raises(ValueError, match="64-character"):
+        SAELensProjector(StatefulFakeSAE(), expected_sae_weights_sha256="main")
+    with pytest.raises(ValueError, match="no digestible"):
+        SAELensProjector(FakeSAE(), expected_sae_weights_sha256=expected)
+
+
+def test_saelens_digest_supports_real_scalar_tensor_buffers():
+    torch = pytest.importorskip("torch")
+    first_sae = StatefulFakeSAE()
+    first_sae._state["threshold"] = torch.tensor(0.5)
+    second_sae = StatefulFakeSAE()
+    second_sae._state["threshold"] = torch.tensor(0.75)
+
+    first = SAELensProjector(first_sae)
+    second = SAELensProjector(second_sae)
+
+    assert len(first.projector_provenance["sae_weights_sha256"]) == 64
+    assert first.projector_provenance["sae_weights_sha256"] != (
+        second.projector_provenance["sae_weights_sha256"]
+    )
+
+
+def test_lens_from_saelens_forwards_expected_weights_digest(monkeypatch):
+    projector = _projector(monkeypatch)
+    captured = {}
+
+    def fake(cls, release, sae_id, **kwargs):
+        captured.update({"release": release, "sae_id": sae_id, **kwargs})
+        return projector
+
+    monkeypatch.setattr(
+        integration.SAELensProjector, "from_pretrained", classmethod(fake)
+    )
+    Lens.from_saelens(
+        "test-release", "layer-3", expected_sae_weights_sha256="a" * 64
+    )
+
+    assert captured["expected_sae_weights_sha256"] == "a" * 64
 
 
 def test_saelens_token_projection_is_a_first_class_lens_backend(monkeypatch):
@@ -205,30 +370,36 @@ def test_token_path_proves_encoding_happens_before_pooling(monkeypatch):
 
 
 def test_default_saelens_lens_rejects_pre_sae_item_pooling(monkeypatch):
-    lens = Lens(_projector(monkeypatch))
-    batch = RepresentationBatch(
+    representations = RepresentationBatch(
         row_ids=("a",),
         arrays={"response_a": np.ones((1, 3))},
         provenance={"representation_contract": _contract()},
     )
+    lens = Lens(
+        _projector(monkeypatch),
+        representation_source=PrecomputedRepresentationSource(representations),
+    )
     with pytest.raises(ValueError, match="encoding happens before pooling"):
-        lens.project_representations(batch)
-
+        lens.featurize([PairItem("a", "p", "x")], views=("response_a",))
 
 def test_explicit_single_token_item_policy_uses_standard_lens_path(monkeypatch):
     projector = _projector(monkeypatch, item_projection_policy="single_token")
-    lens = Lens(projector)
-    batch = RepresentationBatch(
+    representations = RepresentationBatch(
         row_ids=("a",),
         arrays={"response_a": np.array([[2.0, 1.0, 0.0]])},
         provenance={"representation_contract": _contract(layout="one_token_per_item")},
     )
-    features = lens.project_representations(batch)
+    lens = Lens(
+        projector,
+        representation_source=PrecomputedRepresentationSource(representations),
+    )
+    features = lens.featurize(
+        [PairItem("a", "p", "x")], views=("response_a",)
+    )
     np.testing.assert_allclose(features.array("z_a"), [[2.0, 1.0]])
     assert features.provenance["lens"]["representation_compatibility"]["status"] == (
         "matched_declared_unpinned"
     )
-
 
 def test_saelens_token_source_rejects_wrong_activation_coordinates(monkeypatch):
     lens = Lens(_projector(monkeypatch))
@@ -314,7 +485,7 @@ def test_registered_loader_uses_saelens_v650_api_and_blocks_unknown_repos(monkey
         @classmethod
         def from_pretrained(cls, **kwargs):
             captured.update(kwargs)
-            return FakeSAE()
+            return StatefulFakeSAE()
 
     root = types.ModuleType("sae_lens")
     root.SAE = Loader
@@ -338,6 +509,19 @@ def test_registered_loader_uses_saelens_v650_api_and_blocks_unknown_repos(monkey
         "dtype": "float32",
         "force_download": True,
     }
+    expected = projector.projector_provenance["sae_weights_sha256"]
+    verified = SAELensProjector.from_pretrained(
+        "release", "sae-id", expected_sae_weights_sha256=expected
+    )
+    assert verified.projector_provenance["sae_acquisition_status"] == (
+        "expected_digest_verified"
+    )
+    captured_before_invalid = dict(captured)
+    with pytest.raises(ValueError, match="64-character"):
+        SAELensProjector.from_pretrained(
+            "release", "sae-id", expected_sae_weights_sha256="main"
+        )
+    assert captured == captured_before_invalid
     with pytest.raises(ValueError, match="trusted registry"):
         SAELensProjector.from_pretrained("owner/repo", "id")
 
@@ -581,6 +765,7 @@ def test_text_backend_featurizes_prompt_and_both_responses_with_one_reader(monke
     assert features.provenance["text_context"] == "independent_documents"
     assert features.provenance["lens"]["feature_space_id"] == lens.feature_space_id
     assert features.provenance["lens"]["feature_space_status"] == "declared_unpinned"
+    assert lens.backend.feature_space_identity == lens.feature_space_identity
     catalog = lens.feature_catalog.select(features.feature_ids)
     catalog.validate_for(features.matrix("z_a"))
     assert catalog.feature_ids == (1, 0)

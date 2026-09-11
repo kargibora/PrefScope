@@ -1,99 +1,17 @@
+import json as _json
+
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
-from prefscope.api.loaded_lens import LoadedLens
-from prefscope.core.dataset import Dataset
+from prefscope.api.loaded_lens import Lens
 from prefscope.core.types import PairItem
-from prefscope import analysis
-
-
-class _PairData(Dataset):
-    def __iter__(self):
-        yield PairItem(id="1", x="q", y_a="aaaa", y_b="b", pref=1.0, model_a="m1", model_b="m2")
-        yield PairItem(id="2", x="q", y_a="a", y_b="bbbb", pref=0.0, model_a="m1", model_b="m2")
-
-
-class _SingleData(Dataset):
-    def __iter__(self):
-        yield PairItem(id="1", x="q", y_a="a")            # y_b is None
-
-
-class FakeEmbedder:
-    """Deterministic: each row is filled with the completion's length."""
-    def encode(self, prompts, completions):
-        return np.array([[float(len(c))] * 4 for c in completions], dtype=np.float32)
-
-
-class FakeProjector:
-    m_total = 3
-    def project(self, x):
-        x = np.asarray(x, dtype=np.float32)
-        # codes: [col0, -col0, 0] — deterministic, sign-carrying
-        return np.stack([x[:, 0], -x[:, 0], np.zeros(len(x))], axis=1).astype(np.float32)
 
 
 def _names():
     return pd.DataFrame({"feature_id": [0, 1, 2], "concept": ["a", "b", "c"],
                          "fidelity_pass": [True, False, True]})
-
-
-def _lens(manifest=None, names=None):
-    return LoadedLens(FakeProjector(), FakeEmbedder(),
-                      names=names, manifest=manifest or {"input_rep": "difference"})
-
-
-def test_project_shapes_and_meta():
-    lens = _lens()
-    codes, meta = lens.project(_PairData())
-    assert codes.shape == (2, 3)
-    assert list(meta.columns) == ["id", "pref", "model_a", "model_b"]
-    assert list(meta["pref"]) == [1.0, 0.0]
-    assert list(meta["model_a"]) == ["m1", "m1"]
-
-
-def test_project_uses_difference_contrast():
-    lens = _lens()
-    codes, _ = lens.project(_PairData())
-    # row1: e_a(len 4) - e_b(len 1) = 3 -> col0=3 ; row2: 1 - 4 = -3 -> col0=-3
-    np.testing.assert_allclose(codes[:, 0], [3.0, -3.0])
-
-
-def test_project_token_granularity_raises():
-    lens = _lens(manifest={"input_rep": "difference", "granularity": "token"})
-    with pytest.raises(ValueError, match="token-granularity"):
-        lens.project(_PairData())
-
-
-def test_project_single_response_raises():
-    lens = _lens()
-    with pytest.raises(ValueError, match="encode_pairs.*requires y_b"):
-        lens.project(_SingleData())
-
-
-def test_diagnose_delegates_to_analysis():
-    lens = _lens(names=_names())
-    codes, meta = lens.project(_PairData())
-    got = lens.diagnose(codes, meta)
-    exp = analysis.diagnose(codes, meta, names=_names())
-    pd.testing.assert_frame_equal(got, exp)
-
-
-def test_evaluate_preference_delegates():
-    lens = _lens()
-    codes = np.random.default_rng(0).normal(size=(60, 3)).astype(np.float32)
-    meta = pd.DataFrame({"pref": (codes[:, 0] > 0).astype(float)})
-    out = lens.evaluate_preference(codes, meta, seed=0)
-    assert out["accuracy"] > 0.8 and "top_features" in out
-
-
-def test_fidelity_feature_ids():
-    assert _lens(names=_names()).fidelity_feature_ids == [0, 2]
-    assert _lens().fidelity_feature_ids is None
-
-
-import json as _json
-import torch
 
 
 def _write_synthetic_lens(tmp_path, m=3, d=4):
@@ -116,10 +34,10 @@ def _write_synthetic_lens(tmp_path, m=3, d=4):
 
 def test_from_dir_loads_projector_names_manifest(tmp_path):
     _write_synthetic_lens(tmp_path)
-    lens = LoadedLens.from_dir(tmp_path, device="cpu")
+    lens = Lens.from_dir(tmp_path, device="cpu")
     assert lens.projector.m_total == 3 and lens.projector.input_dim == 4
     assert lens.input_rep == "difference"
-    assert lens.names is not None and lens.fidelity_feature_ids == [0, 1, 2]
+    assert lens.names is not None
     assert lens.embedder is not None        # constructed lazily; no model download
 
 
@@ -138,11 +56,10 @@ def test_from_dir_merges_bundled_and_external_annotations(tmp_path):
         "presence_pass": [True, True, False],
     }).to_csv(external / "feature_calibration.csv", index=False)
 
-    lens = LoadedLens.from_dir(tmp_path, annotations=external)
+    lens = Lens.from_dir(tmp_path, annotations=external)
 
     assert {"concept", "fidelity_pass", "semantic_threshold", "presence_pass"} <= \
         set(lens.feature_table.columns)
-    assert lens.fidelity_feature_ids == [0, 2]
     assert lens.feature_table.set_index("feature_id").loc[1, "semantic_threshold"] == 0.3
 
 
@@ -150,12 +67,63 @@ def test_inference_only_bundle_round_trips_through_regular_loader(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     _write_synthetic_lens(source)
-    loaded = LoadedLens.from_dir(source)
+    loaded = Lens.from_dir(source)
     release = tmp_path / "release"
 
     loaded.save(release, inference_only=True)
-    restored = LoadedLens.from_dir(release)
+    restored = Lens.from_dir(release)
 
     assert restored.projector.m_total == loaded.projector.m_total
     assert restored.input_rep == "difference"
     assert list(restored.concept_names) == list(loaded.concept_names)
+
+
+@pytest.mark.parametrize("replacement", ["weights", "whitener"])
+def test_loaded_native_identity_stays_bound_after_backing_replacement(tmp_path, replacement):
+    from prefscope import PrecomputedRepresentationSource, RepresentationBatch
+    from prefscope.sae.whiten import Whitener
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _write_synthetic_lens(source)
+    checkpoint = torch.load(source / "sae_model.pt", weights_only=True)
+    checkpoint["state_dict"]["encoder.weight"].fill_(1.0)
+    torch.save(checkpoint, source / "sae_model.pt")
+    lens = Lens.from_dir(source)
+    items = [PairItem(id="row", x="prompt", y_a="A", y_b="B")]
+    representations = PrecomputedRepresentationSource(
+        RepresentationBatch(
+            row_ids=("row",),
+            arrays={"response_a": np.ones((1, 4)), "response_b": np.zeros((1, 4))},
+            provenance={
+                "representation_family": "text_embedding",
+                "embed_model_id": "Qwen/Qwen3-Embedding-0.6B",
+            },
+        )
+    )
+    lens.representation_source = representations
+    # Do not read feature_space_identity before replacing the backing files: load
+    # must bind it eagerly, not when the first extraction happens.
+    if replacement == "weights":
+        checkpoint["state_dict"]["encoder.weight"].fill_(2.0)
+        torch.save(checkpoint, source / "sae_model.pt")
+    else:
+        Whitener("standardize", np.zeros(4), std=np.full(4, 2.0)).save(source)
+
+    restored = Lens.from_dir(source)
+    restored.representation_source = representations
+    original_features = lens.featurize(items)
+    replacement_features = restored.featurize(items)
+    original_matrix = original_features.matrix("z_diff")
+    replacement_matrix = replacement_features.matrix("z_diff")
+
+    assert not np.array_equal(original_matrix.values, replacement_matrix.values)
+    assert lens.feature_space_id != restored.feature_space_id
+    assert lens.backend.feature_space_identity == lens.feature_space_identity
+    assert original_matrix.provenance["lens"]["feature_space_id"] == lens.feature_space_id
+    lens.feature_catalog.validate_for(original_matrix, require_exact=True)
+    with pytest.raises(ValueError, match="different feature spaces"):
+        restored.feature_catalog.validate_for(original_matrix, require_exact=True)
+    with pytest.raises(ValueError, match="changed since loading"):
+        lens.save(tmp_path / "invalid-publication")
+    assert not (tmp_path / "invalid-publication").exists()

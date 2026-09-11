@@ -3,8 +3,7 @@
 A ``LensRep`` owns how a lens turns paired completion embeddings into (a) SAE training
 rows, (b) inference-time contrast codes, and (c) the saved code arrays. The pipeline
 resolves one by name (the manifest's ``input_rep``) via the registry, so adding a
-representation is one class — not edits across build_lens / oriented_bank / diagnose /
-loaded_lens.
+representation is one class — not repeated edits across training and loading code.
 
 This is the live pipeline's analogue of the item-level
 ``core.representation.Representation`` (used by the not-yet-implemented ``Lens`` facade),
@@ -29,7 +28,7 @@ def _f32(x) -> np.ndarray:
 class LensRep(ABC):
     """Train/project/save lifecycle for one lens input representation."""
 
-    # contrastive reps build an A/B contrast lens (build_lens / bank / diagnose); a
+    # contrastive reps build an A/B contrast lens; a
     # non-contrastive rep (e.g. prompt) has no A/B pairing and is rejected up front.
     contrastive: bool = True
     # per_side reps have an encoder that codes a single response on its own, so they can

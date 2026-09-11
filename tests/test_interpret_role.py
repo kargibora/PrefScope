@@ -4,8 +4,6 @@ import re
 import numpy as np
 import pandas as pd
 
-from prefscope import __main__ as cli
-from prefscope.cli import common as cli_common
 from prefscope.interpret.role import (
     classify_response_roles,
     combine_behavior_scope,
@@ -233,81 +231,3 @@ def test_role_classifier_falls_back_to_missing_examples_individually():
     assert result["n_valid"] == 4
     assert result["label_coverage"] == 1.0
     assert json.loads(result["batch_summaries_json"])[0]["n_labelled"] == 4
-
-
-def test_classify_role_cli_filters_fidelity_and_resumes(tmp_path, monkeypatch):
-    n = 6
-    pd.DataFrame({
-        "instruction_id": [str(i) for i in range(n)],
-        "model_a": "A",
-        "model_b": "B",
-    }).to_parquet(tmp_path / "battles.parquet", index=False)
-    np.save(tmp_path / "z_diff.npy", np.zeros((n, 2), dtype=np.float32))
-    np.save(tmp_path / "z_a.npy", np.ones((n, 2), dtype=np.float32))
-    np.save(tmp_path / "z_b.npy", np.zeros((n, 2), dtype=np.float32))
-    (tmp_path / "manifest.json").write_text(json.dumps({
-        "input_rep": "individual",
-        "sae_type": "batchtopk-relu",
-        "activation_polarity": "nonnegative",
-    }))
-    annotations = tmp_path / "annotations.json"
-    annotations.write_text(json.dumps({
-        "per_sample": [
-            {
-                "instruction_id": str(i),
-                "model_a": "A",
-                "model_b": "B",
-                "instruction": f"prompt {i}",
-                "completion_a": f"answer a {i}",
-                "completion_b": f"answer b {i}",
-                "judge_pref": 1.0,
-            }
-            for i in range(n)
-        ]
-    }))
-    names = tmp_path / "fidelity.csv"
-    pd.DataFrame({
-        "feature_id": [0, 1],
-        "concept": ["uses headings", "unverified"],
-        "fidelity_pass": [True, False],
-    }).to_csv(names, index=False)
-    linkage = tmp_path / "linkage.csv"
-    pd.DataFrame({
-        "feature_id": [0],
-        "prompt_scope": ["no_detected_prompt_link"],
-    }).to_csv(linkage, index=False)
-    out = tmp_path / "roles.csv"
-    calls = []
-
-    def fake_classify(battles, z_a, z_b, names_df, client, **kwargs):
-        calls.append(list(kwargs["features"]))
-        rows = [{
-            "feature_id": int(feature_id),
-            "concept": "uses headings",
-            "classification_status": "ok",
-            "semantic_role": "presentation",
-            "semantic_family": "behavioral",
-            "behavior_scope": "candidate_cross_prompt_behavior",
-        } for feature_id in kwargs["features"]]
-        for row in rows:
-            kwargs["on_result"](row)
-        return pd.DataFrame(rows)
-
-    monkeypatch.setattr(
-        "prefscope.interpret.role.classify_response_roles", fake_classify
-    )
-    monkeypatch.setattr(cli_common, "LLMClient", lambda **kwargs: object())
-    argv = [
-        "interpret", "classify-role",
-        "--lens-dir", str(tmp_path),
-        "--annotations", str(annotations),
-        "--names", str(names),
-        "--linkage", str(linkage),
-        "--out", str(out),
-        "--model", "test-model",
-    ]
-
-    assert cli.main(argv) == 0
-    assert cli.main(argv) == 0
-    assert calls == [[0]]
-    assert pd.read_csv(out)["feature_id"].tolist() == [0]

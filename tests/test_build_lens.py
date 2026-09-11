@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from prefscope import Lens, load_feature_catalog
 from prefscope.pipeline.build_lens import (
     build_lens, build_lens_from_embeddings, build_prompt_lens)
 from prefscope.encode.sae import SAEProjector
@@ -127,6 +128,12 @@ def test_build_prompt_lens_auto_uses_nonnegative_sae_and_no_matryoshka(tmp_path)
     assert out["matryoshka_prefix_lengths"] == []
     assert len(out["dataset_hash"]) == 64
     assert (np.load(out_dir / "z_prompt.npy") >= 0).all()
+    names = pd.read_csv(out_dir / "prompt_feature_names.csv")
+    assert names["feature_id"].tolist() == list(range(8))
+    assert names["concept"].isna().all()
+    catalog = load_feature_catalog(out_dir / "feature_catalog.json")
+    assert catalog.feature_ids == tuple(range(8))
+    assert catalog.feature_space_status == "exact_weights"
     assert not (out_dir / "whiten.npz").exists()
     assert not (out_dir / "stale.txt").exists()
 
@@ -372,9 +379,30 @@ def test_rebuild_replaces_whole_completion_directory(tmp_path):
 
     expected = {
         "manifest.json", "sae_model.pt", "sae_training_log.csv",
-        "battles.parquet", "z_diff.npy",
+        "battles.parquet", "z_diff.npy", "feature_names.csv",
+        "feature_catalog.json",
     }
     assert {path.name for path in out_dir.iterdir()} == expected
+    names = pd.read_csv(out_dir / "feature_names.csv")
+    assert names["feature_id"].tolist() == list(range(8))
+    assert names["concept"].isna().all()
+    catalog = load_feature_catalog(out_dir / "feature_catalog.json")
+    assert catalog.feature_ids == tuple(range(8))
+    assert catalog.feature_space_status == "exact_weights"
+    loaded = Lens.from_dir(out_dir, device="cpu")
+    assert catalog.feature_space_id == loaded.feature_space_id
+    assert loaded.feature_catalog.provenance["names_artifact"] == "feature_names.csv"
+    assert loaded.concept_names is None
+    catalog_path = out_dir / "feature_catalog.json"
+    catalog_blob = tmp_path / "catalog-blob.json"
+    catalog_path.rename(catalog_blob)
+    catalog_path.symlink_to(catalog_blob)
+    hub_style = Lens.from_dir(out_dir, device="cpu")
+    assert hub_style.feature_catalog.feature_space_id == hub_style.feature_space_id
+    names_path = out_dir / "feature_names.csv"
+    names_path.write_bytes(names_path.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="names provenance"):
+        _ = loaded.feature_catalog
     assert json.loads((out_dir / "manifest.json").read_text()) == manifest
 
 

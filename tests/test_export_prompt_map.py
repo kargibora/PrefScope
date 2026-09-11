@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.viewer_export import export_prompt_map
+from prefscope.recipes.viewer_export.maps import export_prompt_map
 
 
 def _setup(tmp: Path):

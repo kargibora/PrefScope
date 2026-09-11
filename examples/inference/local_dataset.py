@@ -8,7 +8,6 @@ from pathlib import Path
 import numpy as np
 
 from prefscope import Lens, TableDataset, save_feature_batch
-from prefscope.observability import observe_run
 
 # Edit these constants, then run: python examples/inference/local_dataset.py
 LENS_CONFIG = Path(__file__).with_name("saelens.yaml")
@@ -30,10 +29,9 @@ def main() -> None:
     )
     rows = list(dataset)[:LIMIT]
 
-    with observe_run(OUTPUT.with_suffix(".events.jsonl"), pretty=True):
-        lens = Lens.from_config(LENS_CONFIG)
-        features = lens.featurize(rows)
-        save_feature_batch(features, OUTPUT, overwrite=True)
+    lens = Lens.from_config(LENS_CONFIG)
+    features = lens.featurize(rows)
+    save_feature_batch(features, OUTPUT, overwrite=True)
 
     print()
     print(f"Featurized {len(rows)} preference pairs:")

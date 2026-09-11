@@ -3,18 +3,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.analysis import (
-    prompt_region_membership as public_prompt_region_membership,
-    region_membership_contrast as public_region_membership_contrast,
-)
-from prefscope.analysis.dataset import region_membership_contrast
-from prefscope.analysis.prompt_regions import prompt_region_membership
-from prefscope.analysis.prompt_regions import regions_from_feature_presence
+from prefscope.recipes.analysis.dataset import region_membership_contrast
+from prefscope.recipes.analysis.prompt_regions import prompt_region_membership
+from prefscope.recipes.analysis.prompt_regions import regions_from_feature_presence
 
 
 def test_prompt_region_membership_keeps_all_active_concepts_and_strengths():
-    assert public_prompt_region_membership is prompt_region_membership
-    assert public_region_membership_contrast is region_membership_contrast
     z = np.array([
         [3.0, 2.0, 0.0],
         [0.0, 4.0, 1.0],

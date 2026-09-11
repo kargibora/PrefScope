@@ -1,29 +1,14 @@
-from prefscope.api.analysis import (
-    AnalysisArtifact,
-    AnalysisComponent,
-    AnalysisDataset,
-    AnalysisPlan,
-    AnalysisDatasetReference,
-    LoadedAnalysisResult,
-    DatasetAnalysisResult,
-    FeatureArtifactDiagnostics,
-    OutcomeAssociations,
-    PairedConceptShift,
-    PreferenceLengthConfounds,
-    PairedOutcomeShifts,
-    PairedOutcomeSpec,
-    PromptConditionedOutcomeShifts,
-    OutcomeSpec,
-    analyze_dataset,
-    load_analysis_result,
-    save_analysis_result,
-)
 from prefscope.api.config import SAEConfig, TrainConfig
 from prefscope.api.encoded import load_feature_batch, save_feature_batch
 from prefscope.api.feature_activations import feature_activation_table
 from prefscope.api.feature_catalog import FeatureCatalog
-from prefscope.api.loaded_lens import Lens, LoadedLens, pairs_to_battles
-from prefscope.api.preference import preference_relevance
+from prefscope.api.feature_catalog_io import (
+    decode_feature_catalog,
+    encode_feature_catalog,
+    load_feature_catalog,
+    save_feature_catalog,
+)
+from prefscope.api.loaded_lens import Lens, pairs_to_battles
 from prefscope.api.representation import (
     EmbeddingRepresentationSource,
     PrecomputedRepresentationSource,
@@ -40,13 +25,11 @@ from prefscope.core.representation import (
     RepresentationBatch,
     RepresentationSource,
 )
-from prefscope.core.table_schema import TableContract
 from prefscope.core.types import PairItem
 from prefscope.integrations.saelens import SAELensProjector, SAELensTextBackend
 
 __all__ = [
     "Lens",
-    "LoadedLens",
     "pairs_to_battles",
     "PairItem",
     "Dataset",
@@ -65,27 +48,11 @@ __all__ = [
     "FeatureMatrix",
     "FeatureBatch",
     "FeatureCatalog",
+    "decode_feature_catalog",
+    "encode_feature_catalog",
+    "load_feature_catalog",
+    "save_feature_catalog",
     "feature_activation_table",
-    "TableContract",
-    "OutcomeSpec",
-    "AnalysisDataset",
-    "AnalysisArtifact",
-    "AnalysisComponent",
-    "FeatureArtifactDiagnostics",
-    "OutcomeAssociations",
-    "PreferenceLengthConfounds",
-    "PairedOutcomeShifts",
-    "PairedOutcomeSpec",
-    "PromptConditionedOutcomeShifts",
-    "PairedConceptShift",
-    "AnalysisPlan",
-    "DatasetAnalysisResult",
-    "AnalysisDatasetReference",
-    "LoadedAnalysisResult",
-    "analyze_dataset",
-    "load_analysis_result",
-    "save_analysis_result",
-    "preference_relevance",
     "load_feature_batch",
     "save_feature_batch",
 ]

@@ -1,14 +1,13 @@
 """export_response_map: one point per single response (A/B), not per A/B pair."""
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
-from prefscope.viewer_export import export_response_map
+from prefscope.recipes.viewer_export.maps import export_response_map
 
 
 def test_response_map_is_per_response(tmp_path):
-    lens = tmp_path / "lens"; lens.mkdir()
+    lens = tmp_path / "lens"
+    lens.mkdir()
     ids = [str(i) for i in range(6)]
     # feature 0 fires on the A responses, feature 1 on the B responses
     np.save(lens / "z_a.npy", np.array([[2.0, 0.0]] * 6, np.float32))
@@ -19,11 +18,13 @@ def test_response_map_is_per_response(tmp_path):
                   "completion_a": ["A-resp %d" % i for i in range(6)],
                   "completion_b": ["B-resp %d" % i for i in range(6)],
                   "model_a": ["mA"] * 6, "model_b": ["mB"] * 6}).to_parquet(corpus)
-    feats = pd.DataFrame({"feature_id": [0, 1], "concept": ["c0", "c1"],
+    feats = pd.DataFrame({"feature_id": [0, 1], "concept": [None, " NaN "],
                           "fidelity_pass": [True, True]})
 
     out = export_response_map(lens, str(corpus), feats, mode="top-activating")
     assert out is not None
+    assert out["concepts"] == ["feature 0", "feature 1"]
+    assert "nan" not in str(out).casefold()
     sides = {p["side"] for p in out["points"]}
     assert sides == {"A", "B"}                       # both single-response sides present
     a = next(p for p in out["points"] if p["side"] == "A")
@@ -35,7 +36,8 @@ def test_response_map_is_per_response(tmp_path):
 
 
 def test_response_map_uses_named_positive_pole_and_sentinel(tmp_path):
-    lens = tmp_path / "lens"; lens.mkdir()
+    lens = tmp_path / "lens"
+    lens.mkdir()
     ids = ["positive", "negative"]
     # Row 0 has a modest positive feature 0 and a much larger negative feature 1.
     # Row 1 has no named positive pole at all.
@@ -62,7 +64,8 @@ def test_response_map_uses_named_positive_pole_and_sentinel(tmp_path):
 
 
 def test_response_map_supports_single_response_lens_without_corpus(tmp_path):
-    lens = tmp_path / "lens"; lens.mkdir()
+    lens = tmp_path / "lens"
+    lens.mkdir()
     np.save(lens / "z_a.npy", np.array([[2.0, 0.0], [0.0, 1.0]], np.float32))
     pd.DataFrame({
         "instruction_id": ["0", "1"], "prompt": ["p0", "p1"],

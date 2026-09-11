@@ -23,11 +23,10 @@ prefscope build-lens --corpus corpus.parquet --input-rep individual \
     --sae-type jumprelu --sparsity-coef 1e-3 --bandwidth 1e-3 --out lenses/jr
 ```
 
-## Adding your own SAE
+## Adding another feature extractor
 
-The SAE is a registry component (kind `sae`). Subclass `BatchTopKSAE`, register it,
-and select it with `--sae-type <your-name>`. See
-[add an SAE](../extending/add-an-sae.md).
+Implement the lens-backend protocol when a new extractor should participate in the
+supported `Lens.featurize(...)` flow. Training implementations remain internal tools.
 
 ## BatchTopK in detail
 

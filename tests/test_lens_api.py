@@ -1,5 +1,4 @@
-"""Tests for the public Lens object: encode / encode_one / concept_names /
-top_concepts / save, the back-compat aliases, pairs_to_battles, and Lens.train."""
+"""Tests for the public Lens object and its feature-extraction helpers."""
 
 import os
 
@@ -7,9 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.api.loaded_lens import Lens, LoadedLens, pairs_to_battles
+from prefscope.api.loaded_lens import Lens, pairs_to_battles
 from prefscope.core.dataset import Dataset
-from prefscope.core.features import FeatureMatrix
 from prefscope.core.types import PairItem
 
 
@@ -52,11 +50,7 @@ def _lens(manifest=None, names=None):
     )
 
 
-# ---- aliases -------------------------------------------------------------
-
-
-def test_loadedlens_is_lens():
-    assert LoadedLens is Lens
+# ---- loading -------------------------------------------------------------
 
 
 def test_load_alias_matches_from_dir():
@@ -70,60 +64,6 @@ def test_constructed_directly_has_no_lens_dir():
 # ---- encode --------------------------------------------------------------
 
 
-def test_encode_individual_shape():
-    lens = _lens()
-    out = lens.encode(["q1", "q2"], ["aaaa", "bb"])
-    assert out.shape == (2, 3)
-    np.testing.assert_allclose(out[:, 0], [4.0, 2.0])
-
-
-def test_encode_prompt_lens_uses_prompts():
-    lens = _lens(manifest={"input_rep": "prompt"})
-    out = lens.encode(["abc", "de"])
-    assert out.shape == (2, 3)
-    np.testing.assert_allclose(out[:, 0], [3.0, 2.0])
-
-
-def test_encode_accepts_single_str():
-    lens = _lens()
-    out = lens.encode("q", "aaaa")
-    assert out.shape == (1, 3)
-
-
-def test_encode_one_shape():
-    lens = _lens()
-    out = lens.encode_one("q", "aaaa")
-    assert out.shape == (3,)
-
-
-def test_encode_difference_guard_raises():
-    lens = _lens(manifest={"input_rep": "difference"})
-    with pytest.raises(ValueError, match="difference lens is contrast-only"):
-        lens.encode(["q"], ["a"])
-
-
-def test_encode_individual_none_completions_raises():
-    lens = _lens()
-    with pytest.raises(ValueError, match="individual lens needs completions"):
-        lens.encode(["p"])
-    with pytest.raises(ValueError, match="individual lens needs completions"):
-        lens.encode_one("p")
-
-
-def test_encode_prompt_lens_none_completions_ok():
-    lens = _lens(manifest={"input_rep": "prompt"})
-    out = lens.encode(["p"])
-    assert out.shape == (1, 3)
-
-
-def test_encode_length_mismatch_raises():
-    lens = _lens()
-    with pytest.raises(ValueError, match="length mismatch"):
-        lens.encode(["p1", "p2"], ["c1"])
-    # equal lengths still return (N, M)
-    assert lens.encode(["p1", "p2"], ["c1", "c2"]).shape == (2, 3)
-
-
 # ---- concept_names / top_concepts ---------------------------------------
 
 
@@ -133,205 +73,15 @@ def test_concept_names_maps_ids():
     assert _lens().concept_names is None
 
 
-def test_top_concepts_named_only_and_sorted():
-    names = pd.DataFrame({"feature_id": [0, 2], "concept": ["a", "c"]})  # 1 unnamed
-    lens = _lens(names=names)
-    codes = np.array([[1.0, -9.0, 2.0]])  # feature 1 has biggest |code| but no name
-    top = lens.top_concepts(codes, k=5)
-    assert len(top) == 1
-    concepts = [c for c, _ in top[0]]
-    assert "b" not in concepts and concepts == ["c", "a"]  # |2| > |1|, both named
-    assert top[0][0] == ("c", 2.0)
-
-
-def test_top_concepts_no_names():
-    assert _lens().top_concepts(np.array([[1.0, 2.0, 3.0]])) == [[]]
-
-
-def test_top_concepts_rejects_wrong_code_width():
-    with pytest.raises(ValueError, match="codes have 2 features but lens has 3"):
-        _lens(names=_names()).top_concepts(np.array([[1.0, 2.0]]))
-
-
 def test_concept_names_dedupes_duplicate_feature_id():
     names = pd.DataFrame({"feature_id": [0, 0, 1], "concept": ["a", "a2", "b"]})
     lens = _lens(names=names)
     s = lens.concept_names
     assert s.index.is_unique
-    # top_concepts must not raise on the duplicate id
-    top = lens.top_concepts(np.array([[3.0, 1.0, 0.0]]), k=2)
-    assert len(top) == 1
+    assert s.to_dict() == {0: "a", 1: "b"}
 
 
-def test_top_concepts_k_zero_returns_empty_lists():
-    lens = _lens(names=_names())
-    out = lens.top_concepts(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]), k=0)
-    assert out == [[], []]
-
-
-def test_top_concepts_skips_nan_codes():
-    lens = _lens(names=_names())
-    out = lens.top_concepts(np.array([[np.nan, 2.0, np.nan]]), k=5)
-    concepts = [c for c, _ in out[0]]
-    assert concepts == ["b"]  # only the non-NaN named code survives
-
-
-def test_concept_activations_returns_every_active_feature_with_annotations():
-    names = pd.DataFrame(
-        {
-            "feature_id": [0, 1, 2],
-            "concept": ["a", "b", "c"],
-            "fidelity_pass": [True, False, True],
-            "semantic_threshold": [1.5, 0.1, 0.4],
-            "presence_pass": [True, True, True],
-        }
-    )
-    lens = _lens(names=names)
-    codes = np.array([[2.0, -3.0, 0.5], [0.0, 0.0, 0.0]], dtype=np.float32)
-
-    out = lens.concept_activations(codes, row_ids=["x", "silent"])
-
-    assert list(out["feature_id"]) == [1, 0, 2]  # all nonzero, ranked by |activation|
-    assert list(out["concept"]) == ["b", "a", "c"]
-    assert list(out["activation"]) == [-3.0, 2.0, 0.5]
-    assert list(out["rank"]) == [1, 2, 3]
-    assert list(out["row_id"].unique()) == ["x"]  # silent row emits no active concepts
-    assert list(out["semantic_present"]) == [False, True, True]
-    assert list(out["concept_pole_matches_name"]) == [False, True, True]
-
-
-def test_concept_activations_filters_fidelity_presence_pole_and_top_k():
-    names = pd.DataFrame(
-        {
-            "feature_id": [0, 1, 2],
-            "concept": ["a", "b", "c"],
-            "fidelity_pass": [True, False, True],
-            "semantic_threshold": [1.5, 0.1, 0.4],
-            "presence_pass": [True, True, False],
-        }
-    )
-    lens = _lens(names=names)
-    codes = np.array([[2.0, 4.0, 0.5]], dtype=np.float32)
-
-    all_rows = lens.concept_activations(codes).set_index("feature_id")
-    assert not bool(all_rows.loc[2, "semantic_present"])
-    fid = lens.concept_activations(codes, fidelity_only=True, top_k=1)
-    assert list(fid["feature_id"]) == [0]  # feature 1 rejected; rank after filtering
-    present = lens.concept_activations(codes, semantic_presence_only=True)
-    assert list(present["feature_id"]) == [1, 0]  # feature 2 calibration failed
-    neg = lens.concept_activations(-codes, pole="negative", min_abs_activation=1.0)
-    assert list(neg["feature_id"]) == [1, 0]
-
-
-def test_lens_fidelity_filters_do_not_treat_string_false_or_nan_as_true():
-    names = pd.DataFrame(
-        {
-            "feature_id": [0, 1, 2],
-            "concept": ["a", "b", "c"],
-            "fidelity_pass": ["True", "False", np.nan],
-        }
-    )
-    lens = _lens(names=names)
-
-    assert lens.fidelity_feature_ids == [0]
-    out = lens.concept_activations(
-        np.array([[1.0, 2.0, 3.0]], dtype=np.float32), fidelity_only=True
-    )
-    assert out["feature_id"].tolist() == [0]
-
-
-def test_concept_activations_preserves_legacy_numeric_ids_and_nonfinite_filtering():
-    lens = _lens(names=_names())
-    out = lens.concept_activations(
-        np.array([[np.nan, 2.0, np.inf]], dtype=np.float32),
-        row_ids=[101],
-        active_only=False,
-    )
-    assert out["row_id"].tolist() == [101]
-    assert out["feature_id"].tolist() == [1]
-    assert out["activation"].tolist() == [2.0]
-
-    default_ids = lens.concept_activations(np.array([[1.0, 0.0, 0.0]]))
-    assert default_ids["row_id"].tolist() == [0]
-
-
-def test_concept_activations_accepts_selected_reordered_feature_matrix():
-    lens = _lens(names=_names())
-    matrix = FeatureMatrix(
-        np.array([[1.0, 3.0]], dtype=np.float32),
-        ("row",),
-        feature_ids=(2, 0),
-    )
-    out = lens.concept_activations(matrix)
-    assert out["feature_id"].tolist() == [0, 2]
-    assert out["activation"].tolist() == [3.0, 1.0]
-    assert out["concept"].tolist() == ["a", "c"]
-
-
-def test_concept_activations_rejects_matrix_from_different_feature_space():
-    lens = _lens(names=_names())
-    lens._feature_space_identity_cache = (
-        None,
-        {
-            "feature_space_id": "space-a",
-            "feature_space_status": "declared_unpinned",
-        },
-    )
-    matrix = FeatureMatrix(
-        np.array([[1.0]], dtype=np.float32),
-        ("row",),
-        feature_ids=(0,),
-        provenance={
-            "lens": {
-                "feature_space_id": "space-b",
-                "feature_space_status": "declared_unpinned",
-            }
-        },
-    )
-    with pytest.raises(ValueError, match="different feature spaces"):
-        lens.concept_activations(matrix)
-
-
-def test_concept_activations_requires_bundled_filter_tables():
-    lens = _lens(
-        names=pd.DataFrame(
-            {
-                "feature_id": [0],
-                "concept": ["a"],
-            }
-        )
-    )
-    codes = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
-    with pytest.raises(ValueError, match="feature_fidelity"):
-        lens.concept_activations(codes, fidelity_only=True)
-    with pytest.raises(ValueError, match="feature_calibration"):
-        lens.concept_activations(codes, semantic_presence_only=True)
-
-
-def test_presence_uses_bundled_calibration_and_explicit_policy():
-    names = pd.DataFrame(
-        {
-            "feature_id": [0, 1, 2],
-            "concept": ["a", "b", "c"],
-            "semantic_threshold": [1.5, np.nan, 0.4],
-            "presence_pass": [True, False, True],
-        }
-    )
-    lens = _lens(names=names)
-    codes = np.array([[1.0, 3.0, 0.5], [2.0, 0.0, 0.2]], dtype=np.float32)
-
-    calibrated = lens.presence(codes)
-    assert calibrated.feature_ids.tolist() == [0, 2]
-    assert calibrated.values.tolist() == [[False, True], [True, False]]
-    mixed = lens.presence(codes, policy="mixed")
-    assert mixed.basis.tolist() == [
-        "semantic_threshold",
-        "positive_nonzero",
-        "semantic_threshold",
-    ]
-
-
-# ---- back-compat project alias ------------------------------------------
+# ---- paired encoding ----------------------------------------------------
 
 
 class _PairData(Dataset):
@@ -348,48 +98,6 @@ class _SingleData(Dataset):
     def __iter__(self):
         yield PairItem(id="s1", x="q", y_a="aaaa", model_a="m1")
         yield PairItem(id="s2", x="q", y_a="bb", model_a="m2")
-
-
-def test_project_alias_returns_tuple():
-    lens = _lens(manifest={"input_rep": "difference"})
-    out = lens.project(_PairData())
-    assert isinstance(out, tuple) and len(out) == 2
-    codes, meta = out
-    assert codes.shape == (2, 3)
-    assert list(meta.columns) == ["id", "pref", "model_a", "model_b"]
-
-
-def test_encode_pairs_same_as_project():
-    lens = _lens(manifest={"input_rep": "difference"})
-    c1, _ = lens.encode_pairs(_PairData())
-    c2, _ = lens.project(_PairData())
-    np.testing.assert_array_equal(c1, c2)
-
-
-def test_encode_items_single_response_individual_lens():
-    codes, meta = _lens().encode_items(_SingleData())
-    np.testing.assert_allclose(codes[:, 0], [4.0, 2.0])
-    assert list(meta.columns) == ["id", "pref", "model_a", "model_b"]
-    assert list(meta["id"]) == ["s1", "s2"]
-
-
-def test_encode_items_pairs_match_encode_pairs():
-    lens = _lens(manifest={"input_rep": "difference"})
-    got, _ = lens.encode_items(_PairData())
-    expected, _ = lens.encode_pairs(_PairData())
-    np.testing.assert_array_equal(got, expected)
-
-
-def test_encode_items_single_requires_individual_and_rejects_mixed():
-    difference = _lens(manifest={"input_rep": "difference"})
-    with pytest.raises(ValueError, match="individual lens"):
-        difference.encode_items(_SingleData())
-    mixed = [
-        PairItem(id="1", x="q", y_a="a"),
-        PairItem(id="2", x="q", y_a="a", y_b="b"),
-    ]
-    with pytest.raises(ValueError, match="homogeneous"):
-        _lens().encode_items(mixed)
 
 
 # ---- save ----------------------------------------------------------------

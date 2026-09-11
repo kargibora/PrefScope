@@ -48,6 +48,23 @@ def test_save_overwrite_replaces_wholesale_no_hybrid(tmp_path):
     assert (dest / "sae_model.pt").read_bytes() == b"weights"
     assert "new" in (dest / "feature_names.csv").read_text()  # replaced, not merged
     assert "STALE" not in (dest / "feature_names.csv").read_text()
+    from prefscope import load_feature_catalog
+    assert dict(load_feature_catalog(dest / "feature_catalog.json").labels) == {0: "new"}
+
+
+def test_save_preserves_labels_that_match_pandas_na_tokens(tmp_path):
+    src = _fake_lens_dir(tmp_path / "src")
+    (src / "feature_names.csv").write_text(
+        "feature_id,concept\n0,NA\n1,N/A\n2,null\n3,\n"
+    )
+    destination = _lens_with_dir(src).save(tmp_path / "published")
+
+    from prefscope import load_feature_catalog
+
+    catalog = load_feature_catalog(destination / "feature_catalog.json")
+    assert dict(catalog.labels) == {0: "NA", 1: "N/A", 2: "null"}
+    text = (destination / "feature_names.csv").read_text()
+    assert "0,NA" in text and "1,N/A" in text and "2,null" in text
 
 
 def test_save_into_empty_dest_ok(tmp_path):
@@ -148,3 +165,24 @@ def test_repackaging_inference_artifact_preserves_array_provenance(tmp_path):
     _lens_with_dir(src).save(dest, inference_only=True)
     manifest = json.loads((dest / "manifest.json").read_text())
     assert manifest["source_output_arrays"] == ["z_a", "z_b", "z_diff"]
+
+
+def test_save_materializes_complete_unnamed_feature_catalog_compatibility_table(tmp_path):
+    import pandas as pd
+
+    from prefscope import load_feature_catalog
+
+    src = _fake_lens_dir(tmp_path / "source-without-names")
+    (src / "feature_names.csv").unlink()
+    (src / "manifest.json").write_text('{"m_total": 3}')
+
+    dest = tmp_path / "published"
+    _lens_with_dir(src).save(dest)
+
+    names = pd.read_csv(dest / "feature_names.csv")
+    assert names["feature_id"].tolist() == [0, 1, 2]
+    assert names["concept"].isna().all()
+    catalog = load_feature_catalog(dest / "feature_catalog.json")
+    assert catalog.feature_ids == (0, 1, 2)
+    assert dict(catalog.labels) == {}
+    assert catalog.provenance["names_artifact"] == "feature_names.csv"

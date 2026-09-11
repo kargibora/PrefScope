@@ -3,7 +3,7 @@ import json
 import pandas as pd
 import pytest
 
-from prefscope.viewer_export.comparison import export_paired_comparison
+from prefscope.recipes.viewer_export.comparison import export_paired_comparison
 
 
 def test_export_paired_comparison_combines_durable_artifacts(tmp_path):
@@ -20,10 +20,12 @@ def test_export_paired_comparison_combines_durable_artifacts(tmp_path):
         "response_scope": ["general_tendency"],
     }).to_parquet(tmp_path / "response_scope.parquet", index=False)
     pd.DataFrame({
-        "feature_id": [7], "region_id": [3], "delta_b_minus_a": [0.2],
+        "feature_id": [7], "concept": ["NaN"],
+        "region_id": [3], "region_concept": [None],
+        "delta_b_minus_a": [0.2],
     }).to_parquet(tmp_path / "concept_shift_by_context.parquet", index=False)
     pd.DataFrame({
-        "feature_id": [7], "direction": ["b_only"],
+        "feature_id": [7], "concept": [""], "direction": ["b_only"],
         "prompt": ["Explain this"], "response_a": ["plain"],
         "response_b": ["## Structured"],
     }).to_parquet(tmp_path / "paired_examples.parquet", index=False)
@@ -33,6 +35,9 @@ def test_export_paired_comparison_combines_durable_artifacts(tmp_path):
     assert exported["meta"]["preference_labels_used"] is False
     assert exported["concepts"][0]["delta_b_minus_a"] == pytest.approx(0.12568)
     assert exported["contexts"][0]["region_id"] == 3
+    assert exported["contexts"][0]["concept"] == "feature 7"
+    assert exported["contexts"][0]["region_concept"] == "prompt feature 3"
+    assert exported["examples"][0]["concept"] == "feature 7"
     assert exported["examples"][0]["response_b"] == "## Structured"
 
 

@@ -1,6 +1,6 @@
 import numpy as np
 
-from prefscope.pipeline.cluster import cluster_examples, cluster_features
+from prefscope.recipes.pipeline.cluster import cluster_examples, cluster_features
 
 
 def test_cluster_examples_recovers_row_groups():

@@ -6,7 +6,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from prefscope import Lens, PairItem, SAEConfig, TrainConfig
-from prefscope.observability import observe_run
 
 # This downloads the public reader model. CPU works; MPS/CUDA is faster.
 DEVICE = "cpu"
@@ -64,8 +63,7 @@ def main() -> None:
         train_kwargs={"n_epochs": 5, "min_epochs": 2, "patience": 2, "batch": 8},
     )
 
-    with observe_run(OUTPUT.with_suffix(".events.jsonl"), pretty=True):
-        lens = Lens.train(make_pairs(), config=config, out=OUTPUT)
+    lens = Lens.train(make_pairs(), config=config, out=OUTPUT)
 
     print()
     print(f"Trained {lens.input_rep} lens with {len(lens.feature_table)} features.")

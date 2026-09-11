@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from prefscope.artifacts import BATTLES, Z_A, Z_B, Z_PROMPT
-from prefscope.pipeline.elicit import run_elicitation
+from prefscope.recipes.pipeline.elicit import run_elicitation
 
 
 def _lens(d, arrays, ids):

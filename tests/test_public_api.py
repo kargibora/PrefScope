@@ -1,37 +1,33 @@
 def test_top_level_imports():
     from prefscope import (
-        Lens,
-        LoadedLens,
-        load_lens,
-        PairItem,
         Dataset,
-        TrainConfig,
-        SAEConfig,
-        diagnose,
-        evaluate_preference,
-        feature_preference_relevance,
-        screen_length_confound,
-        registry,
-        create_demo,
-        make_demo_corpus,
-        extract_text_concepts,
+        FeatureBatch,
         FeatureCatalog,
+        FeatureMatrix,
+        Lens,
+        LensBackend,
+        PairItem,
+        Report,
+        activation_summary,
+        coactivation_counts,
         feature_activation_table,
+        load_lens,
     )
 
-    assert LoadedLens is Lens
-    assert all(item is not None for item in (PairItem, Dataset, TrainConfig, SAEConfig))
-    assert callable(load_lens)
-    assert callable(diagnose)
-    assert callable(evaluate_preference)
-    assert callable(feature_preference_relevance)
-    assert callable(screen_length_confound)
-    assert callable(create_demo)
-    assert callable(make_demo_corpus)
-    assert callable(extract_text_concepts)
-    assert FeatureCatalog is not None
-    assert callable(feature_activation_table)
-    assert hasattr(registry, "make")
+    assert all(
+        item is not None
+        for item in (
+            PairItem, Dataset, Lens, FeatureBatch, FeatureMatrix, FeatureCatalog,
+            LensBackend, Report,
+        )
+    )
+    assert all(
+        callable(item)
+        for item in (
+            load_lens, activation_summary, coactivation_counts,
+            feature_activation_table,
+        )
+    )
 
 
 def test_load_lens_delegates(monkeypatch):

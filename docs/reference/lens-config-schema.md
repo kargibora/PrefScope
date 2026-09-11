@@ -1,8 +1,8 @@
 # Lens Config Schema
 
 `Lens.from_config(...)` loads one backend-neutral lens from a strict YAML mapping.
-Unknown keys fail closed. This file selects exactly one lens; it does not configure an
-entire managed `prefscope analyze` run, a dataset, or several feature spaces.
+Unknown keys fail closed. This file selects exactly one lens; it does not configure a
+dataset, analysis workflow, or several feature spaces.
 
 ## Published PrefScope lens
 
@@ -29,6 +29,7 @@ version: 1
 backend: saelens
 release: gpt2-small-res-jb
 sae_id: blocks.8.hook_resid_pre
+expected_sae_weights_sha256: f695981135f1b90e8c5fdb96039c4a4307f41ac5844bb7f5455a422fc8408786
 device: cpu
 dtype: float32
 sae_batch_size: 1024
@@ -41,24 +42,22 @@ allow_unregistered_release: false
 
 The reader model, hook, preprocessing, context size, and sequence-position slice come
 from checkpoint metadata. `long_text_policy=truncate` keeps the first declared context
-window. Prompt and response views are independent documents. External SAE identifiers
-remain unpinned.
+window. Prompt and response views are independent documents.
 
-## Registered custom backend
+PrefScope records exact feature-space identity from the loaded SAE tensor/buffer state,
+implementation class/version, and coordinate configuration. Release and SAE identifiers still route through a mutable
+loader even when `expected_sae_weights_sha256` verifies the returned loaded-state digest;
+a mismatch fails closed. Bootstrap a new pin in a trusted exploratory run with
+`lens.sae_weights_sha256`, then require it in later configs. Reader identity is tracked
+separately and remains `declared_unpinned`, including when `reader_model_revision` is
+supplied. The adjacent repository `examples/inference/saelens.yaml` verifies its SAE
+state with an expected digest.
 
-```yaml
-version: 1
-backend: my-backend
-options:
-  model: local-model
-```
+## Custom backends
 
-The trusted plug-in must be imported explicitly and register `my-backend` under the
-`lens_backend` registry kind before `Lens.from_config(...)` runs. The repository example
-accepts repeatable global `--plugin MODULE` options for this purpose. Import only code
-you trust: plug-in registration executes ordinary Python imports. An explicitly configured top-level
-`device` is passed to the custom backend constructor; do not duplicate it in `options`.
-PrefScope never scans installed packages.
+Construct custom `LensBackend` implementations directly with `Lens.from_backend(...)`.
+The supported config file covers built-in backend forms; it is not a general plug-in or
+analysis configuration language.
 
 ## Capabilities and views
 

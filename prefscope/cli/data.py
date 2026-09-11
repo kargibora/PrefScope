@@ -31,7 +31,6 @@ def _cmd_init_demo(args) -> int:
 
     paths = create_demo(args.out, force=args.force)
     print(f"wrote synthetic corpus: {paths['corpus']}")
-    print(f"wrote pipeline config: {paths['config']}")
     print(
         "next: prefscope build-lens --corpus "
         f"{paths['corpus']} --out {paths['lens']} --m-total 16 --k 4 "
@@ -281,71 +280,6 @@ def _cmd_encode_dataset(args) -> int:
         overwrite=args.overwrite,
     )
     print(json.dumps(manifest, indent=2, default=str))
-    return 0
-
-
-def _cmd_compare_responses(args) -> int:
-    """Compare two prompt-aligned response sets without using preference labels."""
-    from prefscope.pipeline.compare import compare_encoded_responses
-
-    comparison = compare_encoded_responses(
-        args.encoded_dir,
-        features=args.features,
-        prompt_dir=args.prompt_encoded_dir,
-        prompt_features=args.prompt_features,
-        prompt_clusters=args.prompt_clusters,
-        side_a_name=args.side_a_name,
-        side_b_name=args.side_b_name,
-        presence_policy=args.presence_policy,
-        prompt_presence_policy=args.prompt_presence_policy,
-        fidelity_only=not args.include_unverified,
-        named_only=not args.include_unnamed,
-        min_context_pairs=args.min_context_pairs,
-        group_col=args.group_col,
-        examples_per_direction=args.examples_per_direction,
-        confidence=args.confidence,
-    )
-    out = comparison.save(args.out)
-    counts = comparison.scope["response_scope"].value_counts().to_dict()
-    print(f"wrote paired response comparison to {out}")
-    print(f"  {len(comparison.overall)} concepts: {counts}")
-    print("  preference labels were not used")
-    return 0
-
-
-def _cmd_concepts(args) -> int:
-    """Export all active concepts for a BYO prompt/response table."""
-    from prefscope import load_lens
-    from prefscope.pipeline.concepts import export_concepts
-
-    token = os.environ.get(args.hf_token_env) if args.hf_token_env else None
-    lens = load_lens(
-        args.lens,
-        device=args.device,
-        revision=args.revision,
-        cache_dir=args.hub_cache_dir,
-        token=token,
-        local_files_only=args.local_files_only,
-        subfolder=args.subfolder,
-        annotations=args.annotations,
-    )
-    result = export_concepts(
-        lens,
-        args.data,
-        args.out,
-        prompt_col=args.prompt_col,
-        response_col=args.response_col,
-        response2_col=args.response2_col,
-        batch_size=args.batch_size,
-        active_only=not args.include_zero,
-        pole=args.pole,
-        min_abs_activation=args.min_abs_activation,
-        top_k=args.top_k,
-        fidelity_only=args.fidelity_only,
-        semantic_presence_only=args.semantic_presence_only,
-        include_text=args.include_text,
-    )
-    print(json.dumps(result, indent=2))
     return 0
 
 

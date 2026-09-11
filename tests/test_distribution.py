@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from prefscope.analysis.distribution import concept_coactivation, concept_distribution
+from prefscope.recipes.analysis.distribution import concept_coactivation, concept_distribution
 
 
 def _codes():

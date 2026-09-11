@@ -9,13 +9,11 @@ from prefscope import (
     Lens,
     LensBackend,
     LensCapabilities,
-    OutcomeSpec,
     PairItem,
     PrecomputedRepresentationSource,
     RepresentationBatch,
     TableDataset,
-    analyze_dataset,
-    preference_relevance,
+    activation_summary,
 )
 from prefscope.api._lens_backend import select_feature_batch
 from prefscope.core.representation import validate_row_ids
@@ -43,8 +41,16 @@ class DemoBackend(LensBackend):
     def code_semantics(self):
         return "numerical_activity"
 
+    @property
+    def feature_space_identity(self):
+        return {
+            "feature_space_id": "demo-space-v1",
+            "feature_space_status": "declared_pinned_coordinate",
+        }
+
     def featurize(self, items, *, views=None, feature_ids=None, batch_size=None):
-        del batch_size
+        if batch_size is not None:
+            raise ValueError("DemoBackend does not support per-call batch_size")
         rows = list(items)
         selected = tuple(range(3)) if feature_ids is None else tuple(feature_ids)
         base = np.arange(len(rows) * 3, dtype=np.float32).reshape(len(rows), 3)
@@ -104,7 +110,7 @@ def _items():
     ]
 
 
-def test_custom_backend_is_a_substitutable_lens_and_direct_analysis_input():
+def test_custom_backend_is_a_substitutable_lens_and_direct_numerical_input():
     lens = Lens.from_backend(DemoBackend())
     features = lens.featurize(
         _items(), views=("prompt", "response_difference"), feature_ids=(2, 0)
@@ -115,25 +121,13 @@ def test_custom_backend_is_a_substitutable_lens_and_direct_analysis_input():
     assert features.feature_ids == (2, 0)
     assert features.matrix("z_diff").activation_polarity == "signed"
     assert features.matrix("z_diff").code_semantics == "activity_difference"
+    assert features.provenance["lens"]["feature_space_id"] == "demo-space-v1"
+    assert lens.feature_space_status == "declared_pinned_coordinate"
 
-    outcome = OutcomeSpec.from_feature_batch(features)
-    result = analyze_dataset(
-        features.matrix("z_diff"),
-        outcomes={"preference": outcome},
-        group_ids=features.metadata["group_id"],
-    )
-    assert not result.outcome_associations.empty
-    assert result.dataset.group_source == "explicit"
+    summary = activation_summary(features.matrix("z_diff"))
+    assert summary["feature_id"].tolist() == [2, 0]
+    assert summary["mean"].tolist() == [2.0, 2.0]
 
-    legacy_codes, legacy_meta = lens.encode_pairs(_items())
-    np.testing.assert_allclose(legacy_codes, np.full((3, 3), 2.0))
-    assert list(legacy_meta.columns) == ["id", "pref", "model_a", "model_b"]
-    assert lens.encode(["p"], ["A"]).shape == (1, 3)
-
-    win_rates = preference_relevance(features)
-    assert set(win_rates["feature_id"]) == {0, 2}
-    assert set(win_rates["outcome_orientation"]) == {"p_a_preferred"}
-    assert set(win_rates["causal_claim"]) == {"none_descriptive_dataset_specific"}
 
 
 def test_select_feature_batch_prunes_unselected_view_semantics():
@@ -168,16 +162,51 @@ def test_select_feature_batch_prunes_unselected_view_semantics():
     assert selected.provenance["producer"] == "test"
 
 
+def test_select_feature_batch_reuses_exact_selection_but_preserves_reordering():
+    batch = FeatureBatch(
+        row_ids=("r",),
+        arrays={"z_a": [[1, 2]], "z_b": [[3, 4]]},
+        roles={"z_a": "response_a", "z_b": "response_b"},
+        orientations={"z_a": "absolute_a", "z_b": "absolute_b"},
+        feature_ids=(7, 2),
+        provenance={"views": {"z_a": {"code_semantics": "numerical_activity"}}},
+    )
+    assert select_feature_batch(
+        batch, views=("response_a", "response_b"), feature_ids=(7, 2)
+    ) is batch
+    reordered = select_feature_batch(
+        batch, views=("response_b", "response_a"), feature_ids=(2, 7)
+    )
+    assert tuple(reordered.arrays) == ("z_b", "z_a")
+    assert reordered.feature_ids == (2, 7)
+    np.testing.assert_array_equal(reordered.array("z_b"), [[4, 3]])
+    assert reordered.provenance["views"] == batch.provenance["views"]
+
+
+def test_featurize_forwards_batch_size_to_custom_backend(monkeypatch):
+    backend = DemoBackend()
+    featurize = backend.featurize
+    received = []
+
+    def capture(items, *, views=None, feature_ids=None, batch_size=None):
+        received.append(batch_size)
+        return featurize(items, views=views, feature_ids=feature_ids)
+
+    monkeypatch.setattr(backend, "featurize", capture)
+    features = Lens.from_backend(backend).featurize(_items(), batch_size=2)
+
+    assert received == [2]
+    assert features.row_ids == ("a", "b", "c")
+
+
 def test_custom_backend_internal_projector_does_not_change_facade_semantics():
     class WrappedBackend(DemoBackend):
         projector = object()
 
     lens = Lens.from_backend(WrappedBackend())
     assert lens.input_rep == "individual"
-    assert lens.encode(["p"], ["A"]).shape == (1, 3)
-    empty, _ = lens.encode_items([])
-    assert empty.shape == (0, 3)
-
+    features = lens.featurize(_items(), views=("response_a",))
+    assert features.array("z_a").shape == (3, 3)
 
 def test_featurize_rejects_mixed_modes_and_bad_backend_alignment():
     lens = Lens.from_backend(DemoBackend())
@@ -257,6 +286,8 @@ def test_native_representation_lens_uses_the_same_featurize_contract():
         )
     )
     lens = Lens(Projector(), representation_source=source)
+    with pytest.raises(ValueError, match="set embed_batch_size"):
+        lens.featurize(items, batch_size=1)
     features = lens.featurize(items)
 
     assert tuple(features.arrays) == ("z_a", "z_b", "z_diff")
@@ -286,6 +317,7 @@ def test_lens_yaml_dispatches_to_saelens_factory(monkeypatch):
             "device": "cpu",
             "text_batch_size": 4,
             "long_text_policy": "error",
+            "expected_sae_weights_sha256": "a" * 64,
         }
     )
 
@@ -294,6 +326,7 @@ def test_lens_yaml_dispatches_to_saelens_factory(monkeypatch):
     assert captured["sae_id"] == "blocks.8.hook_resid_pre"
     assert captured["text_batch_size"] == 4
     assert captured["long_text_policy"] == "error"
+    assert captured["expected_sae_weights_sha256"] == "a" * 64
 
 
 def test_capability_and_backend_output_semantics_fail_closed():
@@ -362,16 +395,6 @@ def test_custom_config_passes_explicit_device_and_rejects_string_booleans(monkey
                 "allow_unregistered_release": "false",
             }
         )
-
-
-def test_preference_relevance_rejects_no_usable_labels():
-    items = [
-        PairItem("a", "p", "A", "B", meta={"group_id": "g1"}),
-        PairItem("b", "q", "C", "D", meta={"group_id": "g2"}),
-    ]
-    features = Lens.from_backend(DemoBackend()).featurize(items)
-    with pytest.raises(ValueError, match="at least one nonmissing"):
-        preference_relevance(features)
 
 
 def test_from_backend_rejects_manifest_semantics_that_conflict_with_backend():

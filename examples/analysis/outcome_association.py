@@ -1,17 +1,14 @@
 #!/usr/bin/env python
-"""Measure one descriptive feature-outcome association on synthetic data."""
+"""Use an optional recipe for a project-specific outcome association."""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 
-from prefscope import FeatureMatrix, OutcomeSpec, analyze_dataset
-from prefscope.observability import observe_run
+from prefscope import FeatureMatrix
+from prefscope.recipes.analysis.outcomes import associate_outcomes, normalize_outcomes
 
 N_ROWS = 24
-EVENTS = Path("example-output/analysis/outcome-association.events.jsonl")
 
 
 def main() -> None:
@@ -21,30 +18,23 @@ def main() -> None:
     features = FeatureMatrix(
         np.column_stack([signal, signal**2]),
         row_ids,
-        role="response",
-        orientation="absolute",
         feature_ids=(0, 1),
-        activation_polarity="signed",
-        code_semantics="synthetic numerical activity",
     )
-    outcome = OutcomeSpec(
+    outcome = normalize_outcomes(
         0.5 + 0.4 * signal,
-        row_ids,
         kind="probability",
         names=("score",),
+        normalization="none",
     )
-
-    EVENTS.parent.mkdir(parents=True, exist_ok=True)
-    with observe_run(EVENTS, pretty=True):
-        result = analyze_dataset(
-            {"features": features}, {"score": outcome}, group_ids=group_ids
-        )
-
-    artifact = result.artifact("outcome_associations")
+    result = associate_outcomes(
+        features.values,
+        outcome,
+        feature_ids=features.feature_ids,
+        group_ids=group_ids,
+    )
     columns = ["feature_id", "n_units", "correlation", "slope", "q_value"]
-    print()
     print("Outcome associations:")
-    print(artifact.table[columns].to_string(index=False))
+    print(result.table[columns].to_string(index=False))
 
 
 if __name__ == "__main__":

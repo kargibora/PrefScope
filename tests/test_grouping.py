@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from prefscope.analysis.grouping import factorize_group_ids, resolve_group_ids
+from prefscope.recipes.analysis.grouping import factorize_group_ids, resolve_group_ids
 
 
 def test_resolve_group_ids_prefers_explicit_and_canonical_columns():

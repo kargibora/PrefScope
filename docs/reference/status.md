@@ -1,60 +1,31 @@
-# Status — what's production vs experimental
+# Current status
 
-A single, honest maturity map of what ships today.
+PrefScope is an alpha research library.
 
-## Supported alpha — works today and is tested
+## Supported
 
-| Area | What |
-|------|------|
-| Data | `prepare-dataset` for local or Hub tables; `build-corpus` for registered arena sources; `inspect` for table checks |
-| Lens build | `build-lens` (`difference`/`individual`), `Lens.train` on paired or homogeneous single-response data, `build-prompt-lens`, sharded `embed-corpus`/`embed-prompts` |
-| Analysis chain | `interpret name` / `interpret verify` / disjoint `interpret calibrate-presence`, `cluster-features`, `feature-relations`, prompt-group-aware `win-relevance` / `elicit` / `conditional-delta`, generic `associate-outcomes`, and label-free paired `compare-responses`; the config runner `prefscope run` and `run_pipeline(...)` |
-| Published-lens application | `prefscope analyze` / `run_analysis(...)` for strict config-driven preparation, frozen-lens encoding, concept export, applicable relationships/comparison/preference analyses, and viewer export |
-| Diagnosis | `diagnose`, `build-bank`, `validate-diagnosis`, `win-relevance` |
-| Python: load and encode | `Lens.load`, `Lens.from_pretrained`, `Lens.from_config`, backend-neutral `featurize`, historical `encode`/`encode_items`/`encode_pairs`, and `project_representations` |
-| Python: analyze | `analyze_dataset`, paired outcome components, prompt-conditioned change components, `normalize_outcomes`, `associate_outcomes`, and `prefscope.analysis` functions |
-| Python: data types | `RepresentationBatch`, `FeatureBatch`, `FeatureMatrix`, proposed-label `FeatureCatalog`, `OutcomeSpec`, versioned `TableContract` schemas, and aligned result artifacts |
-| Extending | public `RepresentationSource`, `LensBackend`, and `AnalysisComponent`; explicit trusted plug-ins; import-driven components; public table/Hub dataset adapters |
-| Viewer | versioned static-bundle export plus the built-in Streamlit viewer; compatible external frontends can consume the JSON bundle |
+- native, published, precomputed, custom-backend, and optional SAELens feature extraction;
+- `PairItem -> Lens.featurize(...) -> FeatureBatch / FeatureMatrix`;
+- explicit feature-space and row identity;
+- separate `FeatureCatalog` annotations and explicit `feature_id` joins;
+- small direct numerical analysis functions;
+- a caller-owned `Report` container;
+- a thin JSON bridge for separate visualization tools;
+- Torch-free base imports.
 
-“Supported” means the software path is tested. It does not mean every result is ready
-for a paper. You must still explain why prompt groups are independent, report missing
-data and analysis choices, and avoid causal or universal quality claims. Semantic
-presence chooses a threshold on one set of prompt groups and checks it on another.
-Group-aware tests report how many independent groups support the result.
+## Recipes, not framework API
 
-## Experimental / partial
+Specialized preference, outcome, context, graph, cluster, and historical reporting code is
+retained below `prefscope.recipes`. It is not registered or automatically executed and may
+change without compatibility guarantees.
 
-| Area | State |
-|------|-------|
-| Token-level SAE | `extract-activations`, `train-token-sae`, `summarize-activations` — present, less exercised |
-| Pretrained SAELens backend | `Lens.from_saelens(...)` and `featurize(...)` lazily load one declared reader and produce prompt/A/B/A-minus-B views from independent documents; `project_saelens_tokens(...)` remains the exact-activation escape hatch. Prompt-conditioned/chat rendering, structured/temporal hooks, and pinned external-checkpoint publication are not built |
-| Alternate SAE (`simple-topk`) | trainable as an ablation; deployable as a frozen lens — it selects top-`K` per example at inference (`_threshold_select` → per-example top-`K`) |
-| `interpret classify-role` | LLM-assigned semantic roles; its own help calls it experimental |
-| `select-lens` | screens a `sae-metrics` sweep; thresholds are heuristics, not a validated selector |
-| Custom `lens_rep` artifacts | the implementation seam is registry-backed, but schema/CLI/downstream capabilities support only difference/individual/prompt; use `RepresentationSource` to replace the vector producer |
-| Residual representation artifacts | pooled fixed-width residuals can use `PrecomputedRepresentationSource` or a custom in-memory `RepresentationSource`; versioned manifest reconstruction and token/ragged activation contracts are not built yet |
-| Third-party plug-in discovery | `prefscope run` loads an explicit trusted `plugins` module list; automatic installed-package/entry-point discovery is not built |
-| Durable analysis results | Schema-1 contracted Parquet summary directories, enforced per-table/aggregate budgets, detached `LoadedAnalysisResult`, and exact dataset reattachment are available and tested; the durable I/O contract is experimental |
-| Reporting feature source | Schema-2 `FeatureBundleReader` provides bounded live memory maps and explicit selection; schema 1 requires eager migration through `load_feature_batch`, whose fixed budgets cover all declared arrays |
-| Observability | Event schema v1 and secure JSONL recording are available for logs, not scientific results; orchestration-wide event coverage is not implied |
-| Feature presentation | `feature_activation_table` joins by selected/reordered feature IDs; `FeatureTableRenderer` provides bounded lazy-Rich/plain output; explicit Neuronpedia retrieval is external and experimental |
-| Report bundle foundation | Report v3 I/O, mandatory dataset/source/compiler/spec/sampling lineage, exact status roll-up, canonical JSON-table v1, and recursive typed privacy roles are available and experimental. Shareable Phase-1 bundles are JSON-only; overwrite has transactional recovery but is not a linearizable atomic directory exchange |
+## Not provided
 
-## Not built (roadmap)
+- automatic analysis selection or orchestration;
+- a fixed universal result schema;
+- statistical-inference policy;
+- privacy classification or filtering;
+- automatic narratives or scientific claims;
+- a built-in visualization application.
 
-Mentioned for scope; not shipped behavior:
-
-- A `diagnose-dataset` command for per-row spurious-preference detection. The low-level
-  `prefscope.analysis.diagnose_dataset` function exists, but no full command or saved
-  output contract ships yet.
-- The Phase-2 report compiler, automatic section planning, and HTML/static renderer.
-  No shipped browser reconstructs or recomputes report statistics from lower-level rows.
-- Feature-Conditioned Prompting — a candidate research direction.
-
-## Building a lens: CLI or Python
-
-Build from the CLI with `build-lens`, or in Python with
-`Lens.train(data, config=..., out=<dir>)`, which trains, saves, and returns a loaded
-`Lens` in one call. Load an existing lens directory with `Lens.load(path)` (alias
-`load_lens`) or `Lens.from_dir` for Python-side inference/diagnosis.
+Callers remain responsible for study design, data governance, and interpretation.

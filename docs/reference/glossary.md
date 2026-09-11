@@ -49,10 +49,8 @@ Short meanings for terms used across PrefScope.
 - **Response tendency** — a prompt-matched difference in semantic concept presence
   between two response sets. It is not automatically a general model behavior.
 - **SAE (sparse autoencoder)** — the model that learns lens features from embeddings.
-- **Semantic presence** — a feature is above a calibrated threshold where its name has
-  enough confirmed precision. Raw `z != 0` is only numerical activity.
-- **Table contract** — a versioned declaration of a result table's required columns,
-  logical types, unique key, direction, and units.
+- **Semantic presence** — a boolean claim defined by a study's explicit method. Raw
+  `z != 0` is only numerical activity.
 - **Tie** — a preference value of `0.5`. Many descriptive preference tables retain it
   as neutral; binary logistic analysis drops it and says so.
 - **`win_assoc`** — a dataset-specific association between a signed response feature and

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from prefscope.analysis.outcomes import normalize_outcomes
-from prefscope.analysis.paired_outcomes import (
+from prefscope.recipes.analysis.outcomes import normalize_outcomes
+from prefscope.recipes.analysis.paired_outcomes import (
     paired_outcome_shift,
     paired_outcome_shift_by_concept,
 )
-from prefscope.analysis.stats import benjamini_hochberg
+from prefscope.recipes.analysis.stats import benjamini_hochberg
 
 
 def test_binary_paired_outcome_uses_exact_mcnemar_and_b_minus_a():

@@ -5,13 +5,13 @@ Synthetic bank with a planted prompt→response signal; no GPU / embeddings.
 import numpy as np
 import pandas as pd
 
-from prefscope.viewer_export import (
-    export_conditional,
-    export_diagnosis,
+from prefscope.recipes.viewer_export.diagnosis import export_diagnosis
+from prefscope.recipes.viewer_export.examples import (
     export_joint_examples,
     export_report_battles,
 )
-from prefscope.pipeline.oriented_bank import build_oriented_codes, save_bank
+from prefscope.recipes.viewer_export.tables import export_conditional
+from prefscope.recipes.pipeline.oriented_bank import build_oriented_codes, save_bank
 
 
 class _Id:
@@ -230,10 +230,10 @@ def test_export_joint_examples_requires_both_axes_and_aligns_battle_ids(tmp_path
     assert all(r["prompt_activation"] > 0 and r["response_activation"] > 0 for r in rows)
 
 
-# --- unnamed concepts emit null, never the string "nan" (A1) ---
+# --- unnamed concepts fall back to IDs, never the string "nan" ---
 
-def test_export_elicitation_emits_null_for_unnamed(tmp_path):
-    from prefscope.viewer_export import export_elicitation
+def test_export_elicitation_falls_back_for_unnamed(tmp_path):
+    from prefscope.recipes.viewer_export.tables import export_elicitation
     csv = tmp_path / "elic.csv"
     pd.DataFrame({
         "prompt_feature": [0, 0],
@@ -246,15 +246,14 @@ def test_export_elicitation_emits_null_for_unnamed(tmp_path):
     out = export_elicitation(str(csv))
     rc = {c["id"]: c["concept"] for c in out["response_concepts"]}
     assert rc[1] == "code blocks"
-    assert rc[2] is None  # not the string "nan"
+    assert rc[2] == "feature 2"
 
 
 def test_export_elicitation_keeps_each_features_top_edges(tmp_path):
     """Per-feature coverage cap: a feature whose best edge is weak GLOBALLY (dwarfed by
     other features' stronger edges) must still be kept, so the Feature panel's 'activated
     by' isn't empty for it (the old global top-N by |lift| dropped exactly these)."""
-    import numpy as np
-    from prefscope.viewer_export import export_elicitation
+    from prefscope.recipes.viewer_export.tables import export_elicitation
     rows = []
     for px in range(60):  # 60 very strong edges for feature 1 would dominate a global top-N
         rows.append({"prompt_feature": px, "completion_feature": 1, "lift": 6.0, "significant": False})
@@ -266,7 +265,7 @@ def test_export_elicitation_keeps_each_features_top_edges(tmp_path):
     assert out["n_edges"] == 61           # true total reported honestly, not the kept count
 
 
-def test_export_conditional_emits_null_for_unnamed_feature(tmp_path):
+def test_export_conditional_falls_back_for_unnamed_feature(tmp_path):
     cond = tmp_path / "cond.csv"
     pd.DataFrame({
         "prompt_concept": [0],
@@ -277,7 +276,7 @@ def test_export_conditional_emits_null_for_unnamed_feature(tmp_path):
     }).to_csv(cond, index=False)
     features = pd.DataFrame({"feature_id": [7], "concept": ["code blocks"]})
     out = export_conditional(str(cond), features)
-    assert out["features"][0]["concept"] is None
+    assert out["features"][0]["concept"] == "feature 99"
     assert out["prompt_concepts"][0]["name"] == "coding help"
 
 
@@ -286,7 +285,7 @@ def test_export_conditional_emits_null_for_unnamed_feature(tmp_path):
 def test_feature_fire_rate_from_per_side_codes(tmp_path):
     """generality = fraction of responses (both sides) where a feature's top-k code != 0."""
     import numpy as np
-    from prefscope.viewer_export import feature_fire_rate
+    from prefscope.recipes.viewer_export.features import feature_fire_rate
     lens = tmp_path / "lens"
     lens.mkdir()
     # 2 battles, 2 features. feature 0 fires: A[b0], B[b0], B[b1] -> 3 of 4 responses = 0.75
@@ -299,7 +298,7 @@ def test_feature_fire_rate_from_per_side_codes(tmp_path):
 
 
 def test_feature_fire_rate_uses_semantic_threshold_when_calibrated(tmp_path):
-    from prefscope.viewer_export import feature_fire_rate
+    from prefscope.recipes.viewer_export.features import feature_fire_rate
     lens = tmp_path / "lens"
     lens.mkdir()
     np.save(lens / "z_a.npy", np.array([[0.5], [3.0]], dtype=np.float32))
@@ -314,7 +313,7 @@ def test_feature_fire_rate_uses_semantic_threshold_when_calibrated(tmp_path):
 def test_feature_fire_rate_needs_per_side_codes(tmp_path):
     """A difference lens has only z_diff (no per-side firing) -> {} (generality absent)."""
     import numpy as np
-    from prefscope.viewer_export import feature_fire_rate
+    from prefscope.recipes.viewer_export.features import feature_fire_rate
     lens = tmp_path / "lens"
     lens.mkdir()
     np.save(lens / "z_diff.npy", np.zeros((2, 2), dtype=np.float32))
@@ -323,7 +322,7 @@ def test_feature_fire_rate_needs_per_side_codes(tmp_path):
 
 def test_feature_prompt_types_counts_significant_elicitors(tmp_path):
     """n_prompt_types = # prompt concepts that significantly (lift>1) elicit the feature."""
-    from prefscope.viewer_export import feature_prompt_types
+    from prefscope.recipes.viewer_export.features import feature_prompt_types
     csv = tmp_path / "elic.csv"
     pd.DataFrame({
         "prompt_feature":     [0, 1, 2,  0, 1, 2],
@@ -342,7 +341,7 @@ def test_dumps_emits_valid_json_for_nan_inf(tmp_path):
     the browser's JSON.parse). String content 'NaN' must be preserved."""
     import json
     import math
-    from prefscope.viewer_export import _dumps
+    from prefscope.recipes.viewer_export.sanitize import _dumps
     import numpy as np
     s = _dumps({"a": float("nan"), "b": math.inf, "c": -math.inf, "d": 1.5,
                 "e": ["x", float("nan"), 2], "text": "value is NaN",
@@ -362,7 +361,7 @@ def test_export_examples_by_model(tmp_path, monkeypatch):
     """Each (model, feature) gets that model's own top-activating answers, from the correct
     side (z_a for model_a, z_b for model_b), with outcome from the model's perspective."""
     import numpy as np
-    import prefscope.viewer_export as ev
+    import prefscope.recipes.viewer_export.examples as ev
     from prefscope import interpret as _interpret  # noqa: F401
     import prefscope.interpret.io as io
 
@@ -391,7 +390,7 @@ def test_export_examples_by_model(tmp_path, monkeypatch):
 
 
 def test_export_examples_by_model_needs_per_side_codes(tmp_path):
-    import prefscope.viewer_export as ev
+    import prefscope.recipes.viewer_export.examples as ev
     features = pd.DataFrame({"feature_id": [0], "fidelity_pass": [True]})
     diag = {"models": ["A", "B"], "features": [0], "concepts": ["c"]}
     assert ev.export_examples_by_model(tmp_path, "corpus.parquet", features, diag) is None
@@ -402,7 +401,7 @@ def test_export_examples_by_model_surfaces_concept_pole_not_magnitude(tmp_path, 
     OPPOSITE pole (a different concept), so it must NOT be surfaced under 'answers exhibiting
     <concept>'. Selection is by signed activation (concept pole), NOT |activation|."""
     import numpy as np
-    import prefscope.viewer_export as ev
+    import prefscope.recipes.viewer_export.examples as ev
     import prefscope.interpret.io as io
 
     lens = tmp_path / "lens"
@@ -445,7 +444,7 @@ def test_export_head_to_head_paired_discordant_counts(tmp_path):
     """Discordant counts come from per-side codes z_a/z_b (NOT the sign-flipped bank), and
     accumulate per unordered model pair oriented a<b by model index."""
     import numpy as np
-    import prefscope.viewer_export as ev
+    import prefscope.recipes.viewer_export.diagnosis as ev
 
     # 3 A-vs-B battles, 1 feature ("fires" == z != 0):
     #  b1: A fires, B doesn't   b2: A fires, B doesn't   b3: A doesn't, B fires
@@ -470,7 +469,7 @@ def test_export_head_to_head_orientation_independent_of_column_order(tmp_path):
     """Counts land on the same (lo, hi) orientation regardless of which model is model_a
     (exercises the a_is_lo=False swap branch)."""
     import numpy as np
-    import prefscope.viewer_export as ev
+    import prefscope.recipes.viewer_export.diagnosis as ev
 
     # both battles are "A expresses it, B doesn't" — but battle 2 puts B in the model_a slot
     lens = _write_side_lens(tmp_path,
@@ -490,7 +489,7 @@ def test_export_head_to_head_orientation_independent_of_column_order(tmp_path):
 def test_export_head_to_head_needs_per_side_codes(tmp_path):
     """A difference lens (only z_diff, no z_a/z_b) can't do a per-side head-to-head -> None."""
     import numpy as np
-    import prefscope.viewer_export as ev
+    import prefscope.recipes.viewer_export.diagnosis as ev
     lens = tmp_path / "lens"
     lens.mkdir()
     np.save(lens / "z_diff.npy", np.zeros((2, 1), dtype=np.float32))
@@ -503,7 +502,7 @@ def test_export_head_to_head_needs_per_side_codes(tmp_path):
 def test_export_meta_has_preference_flag(tmp_path):
     """has_preference is True only when win-relevance columns reached the features table."""
     import json
-    from prefscope.viewer_export import export_meta
+    from prefscope.recipes.viewer_export.features import export_meta
 
     lens = tmp_path / "lens"
     lens.mkdir()
@@ -526,7 +525,7 @@ def test_export_meta_has_preference_flag(tmp_path):
 
 def test_export_meta_exposes_single_response_mode(tmp_path):
     import json
-    from prefscope.viewer_export import export_meta
+    from prefscope.recipes.viewer_export.features import export_meta
 
     lens = tmp_path / "lens"
     lens.mkdir()
@@ -541,7 +540,7 @@ def test_export_meta_exposes_single_response_mode(tmp_path):
 def test_export_meta_r2_is_loo_semantics(tmp_path):
     """r2/is_loo are honest: loo_r2 is null unless predictions are genuinely LOO."""
     import json
-    from prefscope.viewer_export import export_meta
+    from prefscope.recipes.viewer_export.features import export_meta
 
     lens = tmp_path / "lens"
     lens.mkdir()

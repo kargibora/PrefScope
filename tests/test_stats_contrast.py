@@ -1,6 +1,6 @@
 import numpy as np
 
-from prefscope.analysis import inside_outside_contrast
+from prefscope.recipes.analysis.stats import inside_outside_contrast
 
 
 def test_contrast_detects_separated_groups():

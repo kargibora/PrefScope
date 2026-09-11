@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
 
-from prefscope.analysis.presence import concept_presence
-from prefscope.pipeline.text_concepts import (
+from prefscope import FeatureBatch
+
+from prefscope.recipes.pipeline.text_concepts import (
     extract_present_concepts, extract_text_concepts, resolve_device,
 )
 
@@ -17,10 +18,6 @@ class _FakeLens:
             "presence_pass": [True, False, True],
             "semantic_role": ["presentation", "topic_content", "presentation"],
         })
-
-    def presence(self, codes, *, feature_ids, policy):
-        return concept_presence(
-            codes, self.feature_table, feature_ids=feature_ids, policy=policy)
 
 
 def test_example_extracts_verified_concepts_and_reports_presence_basis():
@@ -59,13 +56,20 @@ class _FakeLoadedLens(_FakeLens):
             "effective_dtype_name": lambda self: "float32",
         })()
 
-    def encode_one(self, prompt, completion=None):
-        return np.array([3.0, 0.0, 0.0])
+    def featurize(self, items, *, views):
+        assert views == ("response_a",)
+        return FeatureBatch(
+            row_ids=tuple(item.id for item in items),
+            feature_ids=(0, 1, 2),
+            arrays={"z_a": np.array([[3.0, 0.0, 0.0]])},
+            roles={"z_a": "response"},
+            orientations={"z_a": "absolute"},
+        )
 
 
 def test_extract_supports_completion_lens_without_prompt_lens(monkeypatch):
     monkeypatch.setattr(
-        "prefscope.pipeline.text_concepts._load_source",
+        "prefscope.recipes.pipeline.text_concepts._load_source",
         lambda *args, **kwargs: _FakeLoadedLens(),
     )
     result = extract_text_concepts(
@@ -79,7 +83,7 @@ def test_extract_supports_completion_lens_without_prompt_lens(monkeypatch):
 def test_extract_rejects_incompatible_two_lens_contracts(monkeypatch):
     lenses = iter([_FakeLoadedLens("prompt-embed"), _FakeLoadedLens("response-embed")])
     monkeypatch.setattr(
-        "prefscope.pipeline.text_concepts._load_source",
+        "prefscope.recipes.pipeline.text_concepts._load_source",
         lambda *args, **kwargs: next(lenses),
     )
     import pytest

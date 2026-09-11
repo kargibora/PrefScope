@@ -6,7 +6,6 @@ import hashlib
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
 
 TEMPLATES = [
@@ -89,12 +88,7 @@ def make_demo_corpus() -> pd.DataFrame:
 
 
 def create_demo(directory, *, force: bool = False) -> dict[str, Path]:
-    """Write a complete pip-installable quickstart workspace.
-
-    The generated config uses absolute paths so it works regardless of the caller's
-    current directory. Existing non-empty directories are refused unless ``force`` is
-    explicit.
-    """
+    """Write a deterministic local example corpus."""
     root = Path(directory).expanduser().resolve()
     if root.exists() and any(root.iterdir()) and not force:
         raise FileExistsError(
@@ -102,34 +96,8 @@ def create_demo(directory, *, force: bool = False) -> dict[str, Path]:
         )
     root.mkdir(parents=True, exist_ok=True)
     corpus = root / "sample_corpus.parquet"
-    config = root / "quickstart.yaml"
-    lens = root / "lens"
-    results = root / "results"
     make_demo_corpus().to_parquet(corpus, index=False)
-    payload = {
-        "lens_dir": str(lens),
-        "corpus": str(corpus),
-        "out_dir": str(results),
-        "stages": ["name", "verify", "cluster", "win-relevance"],
-        "llm": {
-            "backend": "openai",
-            "model": "deepseek/deepseek-v3.2",
-            "api_base": "https://openrouter.ai/api/v1",
-            "api_key_env": "OPENROUTER_API_KEY",
-        },
-        "interpreter": {"name": "auto", "n_active": 3, "n_zero": 3},
-        "verifier": {"name": "auto", "n_per_bucket": 3},
-        "clusterer": {"name": "spherical-kmeans", "n_clusters": 4},
-        "win_relevance": {"all_features": False},
-    }
-    config.write_text(yaml.safe_dump(payload, sort_keys=False))
-    return {
-        "root": root,
-        "corpus": corpus,
-        "config": config,
-        "lens": lens,
-        "results": results,
-    }
+    return {"root": root, "corpus": corpus, "lens": root / "lens"}
 
 
 __all__ = ["create_demo", "make_demo_corpus"]

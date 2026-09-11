@@ -5,12 +5,12 @@ import pandas as pd
 import pytest
 
 from prefscope.interpret.io import load_lens_battles
-from prefscope.viewer_export.examples import (
+from prefscope.recipes.viewer_export.examples import (
     export_examples,
     export_joint_examples,
     export_prompt_examples,
 )
-from prefscope.viewer_export.overview import export_prompt_coactivation
+from prefscope.recipes.viewer_export.overview import export_prompt_coactivation
 
 
 def _single_lens(tmp_path, n=6, m=3):
@@ -66,6 +66,17 @@ def test_export_examples_on_single_response_lens(tmp_path):
     assert rows and all(r["prompt"] and r["completion_a"] for r in rows)
     assert all(r["completion_b"] == "" for r in rows)
     assert all(r["group"] == "de" and r["group_column"] == "language" for r in rows)
+
+
+def test_export_examples_single_response_excludes_negative_pole(tmp_path):
+    lens, corpus = _single_lens(tmp_path, n=4, m=1)
+    np.save(lens / "z_a.npy", np.array([[-20.0], [0.0], [1.0], [3.0]], dtype=np.float32))
+    features = pd.DataFrame({"feature_id": [0], "concept": ["positive concept"]})
+
+    rows = export_examples(lens, str(corpus), features, n_per=4)["0"]
+
+    assert [row["z"] for row in rows] == [3.0, 1.0]
+    assert all(row["activation_reference"] == "positive_activation" for row in rows)
 
 
 def test_export_examples_keeps_language_specific_evidence(tmp_path):
@@ -183,7 +194,7 @@ def test_export_prompt_examples_covers_unverified_and_silent_axes(tmp_path):
 
 
 def test_response_map_reads_prepared_corpus_ids(tmp_path):
-    from prefscope.viewer_export.maps import _corpus_frame
+    from prefscope.recipes.viewer_export.maps import _corpus_frame
     corpus = tmp_path / "prepared.parquet"
     pd.DataFrame({
         "row_id": [0, 1], "prompt": ["p0", "p1"], "completion_a": ["a0", "a1"],

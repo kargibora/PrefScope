@@ -6,10 +6,10 @@ planted signal, so each new statistic is checked against a known answer.
 import numpy as np
 import pandas as pd
 
-from prefscope.pipeline.diagnose import (diagnose_features, diagnose_from_bank)
-from prefscope.pipeline.oriented_bank import (build_oriented_codes, save_bank,
+from prefscope.recipes.pipeline.diagnose import (diagnose_features, diagnose_from_bank)
+from prefscope.recipes.pipeline.oriented_bank import (build_oriented_codes, save_bank,
                                               load_bank)
-from prefscope.pipeline.validate import validate_diagnosis
+from prefscope.recipes.pipeline.validate import validate_diagnosis
 
 
 class _IdProjector:

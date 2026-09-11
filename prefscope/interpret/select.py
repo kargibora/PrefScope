@@ -14,17 +14,9 @@ from prefscope.core import registry
 # feature's temporary matrix around 66 MiB in float32 for Qwen3-Embedding-8B.
 _SIMILAR_CANDIDATE_CAP = 4_000
 
-_SAMPLING_ALIASES = {
-    # Historical name: this sampled uniformly inside each active/sign bucket; it
-    # did not stratify by activation magnitude. Keep accepting it for checkpoints
-    # and scripts, but expose the honest name in new CLI output.
-    "stratified-random": "random-active",
-}
-
-
 def normalize_verification_sampling(sampling: str) -> str:
     """Return the canonical verification sampling name."""
-    value = _SAMPLING_ALIASES.get(str(sampling), str(sampling))
+    value = str(sampling)
     valid = {"extremes", "random-active", "quantile-stratified"}
     if value not in valid:
         raise ValueError(
@@ -135,7 +127,6 @@ def holdout_buckets(z_col: np.ndarray, pool: np.ndarray, n_per_bucket: int,
     ``extremes`` keeps the original top-|z| case-control protocol.
     ``random-active`` samples uniformly inside each sign bucket.
     ``quantile-stratified`` covers weak through strong activation magnitudes.
-    The legacy name ``stratified-random`` is an alias for ``random-active``.
     """
     sampling = normalize_verification_sampling(sampling)
     pool = np.asarray(pool)

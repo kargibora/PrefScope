@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import errno
+import hashlib
 import json
+from numbers import Integral
 import os
 from pathlib import Path
 import shutil
@@ -11,11 +13,21 @@ import socket
 import stat
 import uuid
 
-from prefscope.api._lens_annotations import _annotation_paths
-from prefscope.artifacts import MANIFEST, SAE_MODEL
+from prefscope.api._lens_annotations import _annotation_paths, _read_annotation_csv
+from prefscope.artifacts import (
+    FEATURE_CATALOG,
+    FEATURE_NAMES,
+    MANIFEST,
+    PROMPT_FEATURE_NAMES,
+    SAE_MODEL,
+)
 
 
 def _locking_module():
+    if os.name == "nt":
+        import msvcrt
+
+        return msvcrt
     try:
         import fcntl
     except ImportError as exc:
@@ -45,15 +57,21 @@ def _validate_lock_parent(parent: Path) -> None:
 
 def _secure_lock_descriptor(lock_path: Path) -> int:
     _validate_lock_parent(lock_path.parent)
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    cloexec = getattr(os, "O_CLOEXEC", None)
-    if nofollow is None or cloexec is None:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if os.name != "nt" and (not nofollow or not cloexec):
         raise RuntimeError("secure publication locking requires O_NOFOLLOW and O_CLOEXEC")
+    if lock_path.is_symlink():
+        raise RuntimeError(
+            f"cannot securely open publication lock {lock_path}: path is a symlink"
+        )
     flags = (
         os.O_RDWR
         | os.O_CREAT
         | os.O_APPEND
         | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
         | nofollow
         | cloexec
     )
@@ -71,10 +89,11 @@ def _secure_lock_descriptor(lock_path: Path) -> int:
             raise RuntimeError(
                 f"publication lock must be owned by this user: {lock_path}"
             )
-        os.fchmod(descriptor, 0o600)
-        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o600:
-            raise RuntimeError(
-                f"publication lock permissions must be 0600: {lock_path}")
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+            if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o600:
+                raise RuntimeError(
+                    f"publication lock permissions must be 0600: {lock_path}")
         entry = lock_path.stat(follow_symlinks=False)
         if (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino):
             raise RuntimeError(
@@ -108,7 +127,7 @@ def _write_lock_metadata(descriptor: int, owner_id: str) -> None:
 @contextmanager
 def _publication_lock(destination: Path):
     """Hold a stable, never-unlinked advisory lock for one destination."""
-    fcntl = _locking_module()
+    locker = _locking_module()
     lock_path = destination.parent / f".{destination.name}.lock"
     try:
         descriptor = _secure_lock_descriptor(lock_path)
@@ -116,11 +135,20 @@ def _publication_lock(destination: Path):
         raise RuntimeError(
             f"cannot securely open publication lock {lock_path}") from exc
 
+    acquired = False
     try:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.name == "nt":
+                if os.fstat(descriptor).st_size == 0:
+                    os.write(descriptor, b"\0")
+                    os.fsync(descriptor)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                locker.locking(descriptor, locker.LK_NBLCK, 1)
+            else:
+                locker.flock(descriptor, locker.LOCK_EX | locker.LOCK_NB)
+            acquired = True
         except OSError as exc:
-            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+            if os.name != "nt" and exc.errno not in {errno.EACCES, errno.EAGAIN}:
                 raise
             raise RuntimeError(
                 f"cannot publish {destination}: another active publisher holds "
@@ -143,7 +171,12 @@ def _publication_lock(destination: Path):
         yield
     finally:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            if acquired:
+                if os.name == "nt":
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    locker.locking(descriptor, locker.LK_UNLCK, 1)
+                else:
+                    locker.flock(descriptor, locker.LOCK_UN)
         finally:
             os.close(descriptor)
 
@@ -163,6 +196,122 @@ def _recover_orphan_backup(destination: Path) -> None:
         raise RuntimeError(
             f"cannot recover {destination}: orphan backup {backup} is not a directory")
     os.replace(backup, destination)
+
+
+def _materialize_feature_names(staging: Path, lens) -> Path:
+    """Publish one complete names table while leaving unnamed axes explicitly blank."""
+    import pandas as pd
+
+    filename = (
+        PROMPT_FEATURE_NAMES if lens.input_rep == "prompt" else FEATURE_NAMES
+    )
+    path = staging / filename
+    backend = getattr(lens, "backend", None)
+    projector = getattr(lens, "projector", None)
+    width_value = getattr(backend, "m_total", None)
+    if width_value is None:
+        width_value = getattr(projector, "m_total", None)
+    frame = _read_annotation_csv(path) if path.is_file() else None
+    if width_value is None and frame is not None and "feature_id" in frame:
+        width_value = 0 if frame.empty else int(frame["feature_id"].max()) + 1
+    if width_value is None and (staging / MANIFEST).is_file():
+        manifest = json.loads((staging / MANIFEST).read_text())
+        width_value = manifest.get("m_total")
+    if width_value is None:
+        raise ValueError("lens publication needs a declared feature width")
+    width = int(width_value)
+    if frame is not None:
+        if "feature_id" not in frame.columns or not frame.columns.is_unique:
+            raise ValueError(f"{filename} needs unique columns including feature_id")
+        raw_ids = frame["feature_id"]
+        if (
+            raw_ids.isna().any()
+            or raw_ids.duplicated().any()
+            or any(
+                isinstance(value, bool) or not isinstance(value, Integral)
+                for value in raw_ids
+            )
+        ):
+            raise ValueError(
+                f"{filename} feature_id values must be unique non-boolean integers"
+            )
+        invalid = [int(value) for value in raw_ids if value < 0 or value >= width]
+        if invalid:
+            raise ValueError(
+                f"{filename} contains feature IDs outside [0, {width}): {invalid[:10]}"
+            )
+        if "concept" not in frame:
+            if "name" not in frame:
+                raise ValueError(f"{filename} needs a concept column")
+            frame = frame.rename(columns={"name": "concept"})
+        frame = (
+            pd.DataFrame({"feature_id": range(width)})
+            .merge(frame, on="feature_id", how="left", validate="one_to_one")
+        )
+    else:
+        frame = pd.DataFrame(
+            {"feature_id": range(width), "concept": [None] * width}
+        )
+    frame.to_csv(path, index=False, lineterminator="\n")
+    return path
+
+
+def _materialize_feature_catalog(staging: Path, lens, names_path: Path) -> Path:
+    """Bundle the complete proposed-name catalog with explicit coordinate identity."""
+    from prefscope.api.feature_catalog import FeatureCatalog
+    from prefscope.api.feature_catalog_io import encode_feature_catalog
+
+    names = _read_annotation_csv(names_path)
+    table = names[["feature_id", "concept"]].rename(columns={"concept": "name"})
+    try:
+        identity = lens.feature_space_identity
+    except (AttributeError, TypeError, ValueError):
+        identity = {
+            "feature_space_id": None,
+            "feature_space_status": "unbound",
+        }
+    if getattr(lens, "_loaded_native_feature_space_identity", None) is not None:
+        from prefscope.api._feature_space import native_lens_feature_space_identity
+
+        staged_identity = native_lens_feature_space_identity(
+            staging / SAE_MODEL,
+            m_total=lens.projector.m_total,
+            input_dim=lens.projector.input_dim,
+            input_rep=lens.input_rep,
+            whiten_path=staging / "whiten.npz",
+        )
+        if staged_identity != identity:
+            raise ValueError(
+                "native lens backing weights or whitener changed since loading; "
+                "reload the lens before saving"
+            )
+    names_digest = hashlib.sha256(names_path.read_bytes()).hexdigest()
+    source = {
+        "kind": "native_lens_names",
+        "evidence_layer": "proposed_label",
+        "artifact": names_path.name,
+        "content_sha256": names_digest,
+        **identity,
+    }
+    catalog = FeatureCatalog(
+        table,
+        provenance={
+            "schema_version": 1,
+            "source_kind": "native_lens_bundle",
+            "input_rep": str(lens.input_rep),
+            "n_features": len(table),
+            "feature_width": len(table),
+            "names_artifact": names_path.name,
+            "names_sha256": names_digest,
+            **identity,
+        },
+        column_sources={"name": source},
+    )
+    path = staging / FEATURE_CATALOG
+    path.write_bytes(
+encode_feature_catalog(catalog)
+    )
+    return path
 
 
 def save_lens(
@@ -260,6 +409,8 @@ def save_lens(
                     # canonical file with the same name inside the staged artifact.
                     if inference_only or path.parent != src.resolve():
                         shutil.copy2(path, staging / path.name)
+            names_path = _materialize_feature_names(staging, lens)
+            _materialize_feature_catalog(staging, lens, names_path)
             if dest.exists():
                 os.replace(dest, backup)
             try:

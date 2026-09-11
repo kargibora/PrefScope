@@ -1,7 +1,7 @@
 # Contributing to PrefScope
 
 Thank you for helping improve PrefScope. Bug fixes, documentation improvements,
-dataset adapters, analysis components, and reproducibility checks are welcome.
+dataset adapters, numerical helpers, and reproducibility checks are welcome.
 
 ## Development setup
 
@@ -16,8 +16,9 @@ uv sync --extra cpu --extra cluster --group dev
 
 The default test loop uses the `cpu` extra. GPU setup depends on the platform; install
 the appropriate PyTorch build from the official PyTorch index before installing the
-`torch` extra. Tests marked `slow` require a large local model or a live service and are
-not part of the default contribution loop.
+`torch` extra. Tests marked `slow` are outside the default loop. Some are local contract
+checks, such as `tests/test_docs_contract.py`; others need a model download or a live
+service. Run local contract checks explicitly before submitting a change.
 
 ## Making a change
 
@@ -28,9 +29,8 @@ not part of the default contribution loop.
    viewer bundles out of commits.
 4. Run the test suite and `git diff --check` before opening a pull request.
 
-Registered components should have a stable kebab-case name, validate unknown options,
-and document their required inputs. Start with
-[`docs/extending/the-registry.md`](docs/extending/the-registry.md).
+Keep extensions behind the relevant protocol and document their required inputs. Start
+with [`docs/extending/add-a-lens-backend.md`](docs/extending/add-a-lens-backend.md).
 
 ## Documentation style
 

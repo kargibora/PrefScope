@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from prefscope import compare_encoded_responses
+from prefscope.recipes.pipeline.compare import compare_encoded_responses
 
 
 def main() -> None:

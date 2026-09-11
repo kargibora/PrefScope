@@ -87,7 +87,7 @@ def test_single_text_stratified_random_respects_total_example_budget():
     names = pd.DataFrame({"feature_id": [0], "concept": ["uses a marker"]})
     out = verify_single_text_features(
         texts, z, names, _FakeClient(), verify_frac=1.0, seed=0,
-        sampling="stratified-random", n_examples=20)
+        sampling="random-active", n_examples=20)
     row = out.iloc[0]
     assert row["n_attempted"] == 20
     assert row["n_pos_ok"] == 10 and row["n_neg_ok"] == 10

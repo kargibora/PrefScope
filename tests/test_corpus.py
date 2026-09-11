@@ -142,3 +142,31 @@ def test_load_corpus_defaults_optional_metadata(tmp_path):
     loaded = load_corpus(p)
     assert list(loaded["language"]) == [""]
     assert list(loaded["source"]) == [""]
+
+
+def test_load_corpus_preserves_explicit_row_and_group_identity(tmp_path):
+    p = tmp_path / "grouped.parquet"
+    pd.DataFrame(
+        {
+            "instruction_id": ["de:source-1", "fr:source-1"],
+            "group_id": ["source-1", "source-1"],
+            "prompt": ["frage", "question"],
+            "completion_a": ["antwort", "réponse"],
+        }
+    ).to_parquet(p, index=False)
+    loaded = load_corpus(p)
+    assert list(loaded["instruction_id"]) == ["de:source-1", "fr:source-1"]
+    assert list(loaded["group_id"]) == ["source-1", "source-1"]
+
+
+def test_normalize_and_write_preserve_explicit_identity(tmp_path):
+    raw = _raw().iloc[:2].assign(
+        instruction_id=["de:source-1", "fr:source-1"],
+        group_id=["source-1", "source-1"],
+    )
+    normalized = normalize(raw, "translated-sft")
+    path = tmp_path / "grouped.parquet"
+    write_corpus(normalized, path)
+    saved = pd.read_parquet(path)
+    assert list(saved["instruction_id"]) == ["de:source-1", "fr:source-1"]
+    assert list(saved["group_id"]) == ["source-1", "source-1"]

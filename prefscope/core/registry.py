@@ -1,8 +1,7 @@
-"""String-name -> class registry, keyed by component kind.
+"""Internal constructors used by native lens-building and interpretation tools.
 
-Adapters self-register on import via @register(kind, name). The Lens facade and
-config resolution look classes up by name; power users bypass this and pass
-instances directly.
+This module is not exported as an analysis API. Custom lens backends and representation
+sources can be passed as ordinary objects.
 """
 from __future__ import annotations
 
@@ -36,12 +35,7 @@ def available(kind: str) -> list[str]:
 
 
 def make(kind: str, name: str, **kwargs):
-    """Resolve and instantiate a registered component (the config-driven entry point).
-
-    Raises ``ValueError`` listing the available names if ``name`` is unknown — the
-    conventional error for a bad config/CLI value (vs. ``get``'s ``KeyError``). This is
-    the single resolver every pipeline stage (interpreter, verifier, clusterer, …) and
-    the YAML config runner go through, so a typo names its alternatives once, here."""
+    """Resolve one internal implementation or report the available names."""
     try:
         cls = get(kind, name)
     except KeyError:

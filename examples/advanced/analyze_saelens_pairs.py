@@ -5,11 +5,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from prefscope import (
-    Lens,
-    TableDataset,
-    save_feature_batch,
-)
+# This specialized statistic is a recipe, imported explicitly.
+from prefscope.recipes.analysis.preference_relevance import preference_relevance
+from prefscope import Lens, TableDataset, save_feature_batch
 
 
 def main() -> None:
@@ -44,7 +42,7 @@ def main() -> None:
     lens = Lens.from_config(args.lens_config)
     features = lens.featurize(items, feature_ids=args.feature_ids)
     out = save_feature_batch(features, args.out)
-    relevance = lens.preference_relevance(
+    relevance = preference_relevance(
         features,
         group_column="group_id" if args.group_id_col else None,
     )

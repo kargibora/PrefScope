@@ -84,14 +84,16 @@ response = Lens.from_pretrained(
 print(len(prompt.feature_table), len(response.feature_table))
 ```
 
-Then run one real embedding on appropriate hardware:
+Then run one real feature extraction on appropriate hardware:
 
-```bash
-prefscope extract-concepts \
-  --repo owner/repository \
-  --prompt-subfolder prompt-m256 \
-  --completion-subfolder completion-m2048 \
-  --prompt "Explain why the sky is blue." \
-  --completion "Shorter wavelengths scatter more strongly." \
-  --device cuda
+```python
+from prefscope import PairItem
+
+item = PairItem(
+    id="smoke",
+    x="Explain why the sky is blue.",
+    y_a="Shorter wavelengths scatter more strongly.",
+)
+features = response.featurize([item], views=("response_a",))
+print(features.matrix("z_a").values.shape)
 ```

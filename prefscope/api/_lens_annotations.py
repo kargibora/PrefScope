@@ -28,6 +28,11 @@ _PROMPT_ANNOTATIONS = (
     *_COMMON_ANNOTATIONS,
 )
 
+def _read_annotation_csv(path: Path) -> pd.DataFrame:
+    """Read explicit empty cells as missing without consuming labels like NA/null."""
+    return pd.read_csv(path, keep_default_na=False, na_values=[""])
+
+
 def _annotation_paths(lens_dir: Path, input_rep: str, annotations=None) -> list[Path]:
     """Canonical annotation files in the lens plus optional external files/dirs."""
     names = _PROMPT_ANNOTATIONS if input_rep == "prompt" else _RESPONSE_ANNOTATIONS
@@ -67,7 +72,7 @@ def _load_feature_table(lens_dir: Path, input_rep: str, m_total: int,
         return None
     table = pd.DataFrame({"feature_id": np.arange(int(m_total), dtype=int)})
     for path in paths:
-        frame = pd.read_csv(path)
+        frame = _read_annotation_csv(path)
         if "feature_id" not in frame.columns:
             raise ValueError(f"annotation file {path} has no feature_id column")
         frame = frame.copy()

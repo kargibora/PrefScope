@@ -3,7 +3,6 @@ from __future__ import annotations
 import builtins
 import io
 import runpy
-from contextlib import contextmanager
 from types import SimpleNamespace
 
 import numpy as np
@@ -205,11 +204,10 @@ def test_rich_absent_uses_clean_plain_text_fallback(example, monkeypatch):
     assert "does not indicate reward, a winner, or semantic presence" in rendered
 
 
-def test_main_uses_one_pair_native_lens_and_automatic_wrapper(
+def test_main_uses_one_pair_native_lens(
     example, monkeypatch, capsys
 ):
     import prefscope
-    import prefscope.observability
 
     calls = []
 
@@ -237,16 +235,8 @@ def test_main_uses_one_pair_native_lens_and_automatic_wrapper(
             calls.append(("from_pretrained", repo, kwargs))
             return FakeLensInstance()
 
-    @contextmanager
-    def fake_observe_run(path, *, pretty):
-        calls.append(("observe_enter", path, pretty))
-        try:
-            yield object()
-        finally:
-            calls.append(("observe_exit",))
 
     monkeypatch.setattr(prefscope, "Lens", FakeLens)
-    monkeypatch.setattr(prefscope.observability, "observe_run", fake_observe_run)
 
     example.main(
         [
@@ -264,14 +254,10 @@ def test_main_uses_one_pair_native_lens_and_automatic_wrapper(
             "cpu",
             "--top-k",
             "2",
-            "--events",
-            "trace.jsonl",
-            "--no-pretty",
         ]
     )
 
-    assert calls[0] == ("observe_enter", "trace.jsonl", False)
-    assert calls[1] == (
+    assert calls[0] == (
         "from_pretrained",
         "user-repo",
         {
@@ -281,16 +267,15 @@ def test_main_uses_one_pair_native_lens_and_automatic_wrapper(
             "local_files_only": False,
         },
     )
-    assert calls[2][0] == "featurize"
-    item = calls[2][1][0]
-    assert len(calls[2][1]) == 1
+    assert calls[1][0] == "featurize"
+    item = calls[1][1][0]
+    assert len(calls[1][1]) == 1
     assert (item.x, item.y_a, item.y_b) == (
         "Prompt text",
         "First answer",
         "Second answer",
     )
-    assert calls[2][2] == ("response_a", "response_b")
-    assert calls[3] == ("observe_exit",)
+    assert calls[1][2] == ("response_a", "response_b")
     assert ("array", "z_a") in calls
     assert ("array", "z_b") in calls
     output = capsys.readouterr().out
@@ -304,7 +289,6 @@ def test_main_difference_lens_reports_only_signed_direct_contrast_without_events
     example, monkeypatch, capsys, tmp_path
 ):
     import prefscope
-    import prefscope.observability
 
     calls = []
 
@@ -330,11 +314,7 @@ def test_main_difference_lens_reports_only_signed_direct_contrast_without_events
             calls.append(("from_dir", path, kwargs))
             return FakeDifferenceLens()
 
-    def fake_observe_run(path, *, pretty):
-        raise AssertionError("observe_run must not be called without --events")
-
     monkeypatch.setattr(prefscope, "Lens", FakeLens)
-    monkeypatch.setattr(prefscope.observability, "observe_run", fake_observe_run)
     monkeypatch.chdir(tmp_path)
     example.main(["--lens-dir", "direct-lens", "--top-k", "2"])
 
@@ -403,39 +383,12 @@ def test_comparison_text_uses_atomic_demo_or_complete_custom_triplet(example):
     )
 
 
-def test_partial_custom_text_fails_before_explicit_event_file(
-    example, monkeypatch, tmp_path
-):
-    import prefscope.observability
-
-    def fake_observe_run(path, *, pretty):
-        raise AssertionError("validation must finish before event recording")
-
-    monkeypatch.setattr(prefscope.observability, "observe_run", fake_observe_run)
-    event_path = tmp_path / "events.jsonl"
-    with pytest.raises(SystemExit, match="must be provided together") as error:
-        example.main(
-            [
-                "--lens-dir",
-                "lens",
-                "--prompt",
-                "private prompt",
-                "--events",
-                str(event_path),
-            ]
-        )
-    assert "private prompt" not in str(error.value)
-    assert not event_path.exists()
-
-
-def test_parser_requires_one_source_and_pretty_defaults_true(example):
+def test_parser_requires_one_source(example):
     with pytest.raises(SystemExit):
         example._parser().parse_args([])
     args = example._parser().parse_args(
         ["--lens-repo", "owner/lens", "--subfolder", "completion"]
     )
-    assert args.pretty is True
-    assert args.events is None
     assert args.local_files_only is False
     with pytest.raises(SystemExit):
         example._parser().parse_args(["--lens-dir", "lens", "--top-k", "51"])

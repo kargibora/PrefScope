@@ -26,13 +26,13 @@ def register_data_commands(sub) -> None:
 
     pdemo = sub.add_parser(
         "init-demo",
-        help="write a self-contained synthetic corpus and quickstart config",
+        help="write a self-contained synthetic corpus",
     )
     pdemo.add_argument("--out", required=True, help="new demo workspace directory")
     pdemo.add_argument(
         "--force",
         action="store_true",
-        help="replace the generated corpus/config inside a non-empty directory",
+        help="replace the generated corpus inside a non-empty directory",
     )
     pdemo.set_defaults(func=_cmd_init_demo)
 
@@ -64,7 +64,7 @@ def register_data_commands(sub) -> None:
         action="store_true",
         dest="keep_labels",
         help="carry the human vote as human_pref (y=P(A preferred)) "
-        "for win-relevance analysis",
+        "for caller-defined preference analysis",
     )
     pc.set_defaults(func=_cmd_build_corpus)
 

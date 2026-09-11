@@ -11,7 +11,6 @@ import argparse
 import math
 import sys
 import unicodedata
-from contextlib import nullcontext
 from dataclasses import dataclass
 from numbers import Integral, Real
 from typing import Mapping, Sequence, TextIO
@@ -407,18 +406,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--device", default="cpu", choices=("cpu", "cuda", "mps"))
     parser.add_argument("--top-k", default=10, type=_bounded_top_k)
-    parser.add_argument(
-        "--events",
-        default=None,
-        type=_nonempty,
-        help="Opt in to automatic PrefScope operation events at this JSONL path.",
-    )
-    parser.add_argument(
-        "--pretty",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Show or hide the compact event view when --events is set (default: show).",
-    )
     return parser
 
 
@@ -465,7 +452,6 @@ def _validate_lens_options(args: argparse.Namespace) -> None:
 
 def _load_lens(args: argparse.Namespace, lens_type: object) -> object:
     """Load the validated native PrefScope or SAELens source."""
-    _validate_lens_options(args)
     if args.lens_repo is not None:
         return lens_type.from_pretrained(
             args.lens_repo,
@@ -493,7 +479,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     # These imports stay here so importing the example and its formatting helpers never
     # triggers an optional model or tensor dependency.
     from prefscope import Lens, PairItem
-    from prefscope.observability import observe_run
 
     try:
         _validate_lens_options(args)
@@ -507,22 +492,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         y_a=completion_a,
         y_b=completion_b,
     )
-    observation = (
-        observe_run(args.events, pretty=args.pretty)
-        if args.events is not None
-        else nullcontext()
-    )
-    with observation:
-        lens = _load_lens(args, Lens)
-        input_rep = getattr(lens, "input_rep", None)
-        if input_rep == "difference":
-            features = lens.featurize([item], views=("response_difference",))
-        elif input_rep == "individual":
-            features = lens.featurize([item], views=("response_a", "response_b"))
-        else:
-            raise ValueError(
-                "completion comparison requires an individual or difference lens"
-            )
+    lens = _load_lens(args, Lens)
+    input_rep = getattr(lens, "input_rep", None)
+    if input_rep == "difference":
+        features = lens.featurize([item], views=("response_difference",))
+    elif input_rep == "individual":
+        features = lens.featurize([item], views=("response_a", "response_b"))
+    else:
+        raise ValueError(
+            "completion comparison requires an individual or difference lens"
+        )
 
     feature_ids = features.feature_ids
     labels = _proposed_labels(lens, feature_ids)

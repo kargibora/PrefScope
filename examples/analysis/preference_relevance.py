@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Rank descriptive preference associations for a small paired sample."""
+"""Use an optional recipe to rank preference associations."""
 
 from __future__ import annotations
 
@@ -8,13 +8,12 @@ from pathlib import Path
 import numpy as np
 
 from prefscope import Lens, TableDataset
-from prefscope.observability import observe_run
+from prefscope.recipes.analysis.preference_relevance import preference_relevance
 
 LENS_CONFIG = Path(__file__).parents[1] / "inference" / "saelens.yaml"
 DATA = Path(__file__).parents[1] / "assets" / "sample_corpus.parquet"
 LIMIT = 25
 N_FEATURES = 64
-EVENTS = Path("example-output/analysis/preference-relevance.events.jsonl")
 
 
 def main() -> None:
@@ -30,15 +29,12 @@ def main() -> None:
         )
     )[:LIMIT]
     probe_rows, rows = sample[:1], sample[1:]
-
-    EVENTS.parent.mkdir(parents=True, exist_ok=True)
-    with observe_run(EVENTS, pretty=True):
-        lens = Lens.from_config(LENS_CONFIG)
-        probe = lens.featurize(probe_rows, views=("response_difference",))
-        activity = np.abs(probe.arrays["z_diff"][0])
-        feature_ids = np.argsort(activity)[-N_FEATURES:][::-1]
-        features = lens.featurize(rows, feature_ids=feature_ids)
-        relevance = lens.preference_relevance(features)
+    lens = Lens.from_config(LENS_CONFIG)
+    probe = lens.featurize(probe_rows, views=("response_difference",))
+    activity = np.abs(probe.arrays["z_diff"][0])
+    feature_ids = np.argsort(activity)[-N_FEATURES:][::-1]
+    features = lens.featurize(rows, feature_ids=feature_ids)
+    relevance = preference_relevance(features)
 
     relevance = relevance.assign(
         absolute_correlation=relevance["correlation"].abs()
@@ -50,7 +46,6 @@ def main() -> None:
         "n_independent_groups",
         "estimand",
     ]
-    print()
     print("Preference relevance:")
     print(relevance[columns].head(8).to_string(index=False))
 

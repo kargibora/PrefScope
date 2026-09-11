@@ -13,6 +13,7 @@ data it writes ``z_a``. Difference lenses always require pairs.
 """
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import logging
@@ -121,6 +122,76 @@ def _prompt_metadata(battles: pd.DataFrame) -> pd.DataFrame:
         if column in battles.columns
     ]
     return battles[cols].reset_index(drop=True)
+
+
+def _write_empty_feature_names(
+    out_dir: Path, *, m_total: int, input_rep: str
+) -> str:
+    """Write the complete native-name compatibility table without inventing labels."""
+    from prefscope.artifacts import FEATURE_NAMES, PROMPT_FEATURE_NAMES
+
+    filename = PROMPT_FEATURE_NAMES if input_rep == "prompt" else FEATURE_NAMES
+    with (out_dir / filename).open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(("feature_id", "concept"))
+        writer.writerows((feature_id, "") for feature_id in range(int(m_total)))
+    return filename
+
+
+def _write_native_feature_catalog(
+    out_dir: Path,
+    *,
+    names_filename: str,
+    m_total: int,
+    input_dim: int,
+    input_rep: str,
+) -> str:
+    """Write the complete durable proposed-name catalog for a trained native lens."""
+    from prefscope.api._feature_space import native_lens_feature_space_identity
+    from prefscope.api.feature_catalog import FeatureCatalog
+    from prefscope.api.feature_catalog_io import encode_feature_catalog
+    from prefscope.artifacts import FEATURE_CATALOG
+
+    names_path = out_dir / names_filename
+    names_digest = hashlib.sha256(names_path.read_bytes()).hexdigest()
+    identity = native_lens_feature_space_identity(
+        out_dir / "sae_model.pt",
+        m_total=m_total,
+        input_dim=input_dim,
+        input_rep=input_rep,
+        whiten_path=out_dir / _WHITEN_FNAME,
+    )
+    source = {
+        "kind": "native_lens_names",
+        "evidence_layer": "proposed_label",
+        "artifact": names_filename,
+        "content_sha256": names_digest,
+        **identity,
+    }
+    catalog = FeatureCatalog(
+        pd.DataFrame(
+            {
+                "feature_id": np.arange(int(m_total), dtype=np.int64),
+                "name": [None] * int(m_total),
+            }
+        ),
+        provenance={
+            "schema_version": 1,
+            "source_kind": "native_lens_bundle",
+            "input_rep": input_rep,
+            "n_features": int(m_total),
+            "feature_width": int(m_total),
+            "names_artifact": names_filename,
+            "names_sha256": names_digest,
+            **identity,
+        },
+        column_sources={"name": source},
+    )
+    path = out_dir / FEATURE_CATALOG
+    path.write_bytes(
+encode_feature_catalog(catalog)
+    )
+    return FEATURE_CATALOG
 
 
 def _validated_manifest(out_dir: Path, manifest_data: dict, projector,
@@ -381,6 +452,16 @@ def _build_prompt_lens_in_dir(emb_dir, out_dir, *,
     metadata = _prompt_metadata(battles)
     metadata.to_parquet(out_dir / "battles.parquet")
     dataset_hash = _ordered_dataset_hash(metadata, {"e_prompt": e})
+    feature_names_file = _write_empty_feature_names(
+        out_dir, m_total=m_total, input_rep="prompt"
+    )
+    feature_catalog_file = _write_native_feature_catalog(
+        out_dir,
+        names_filename=feature_names_file,
+        m_total=m_total,
+        input_dim=int(config["input_dim"]),
+        input_rep="prompt",
+    )
 
     best_val = config["best_val_norm_mse"]
     from prefscope.core.manifest import SCHEMA_VERSION
@@ -420,7 +501,10 @@ def _build_prompt_lens_in_dir(emb_dir, out_dir, *,
     }
     return _validated_manifest(
         out_dir, manifest_data, proj,
-        {"sae_model.pt", "sae_training_log.csv", "z_prompt.npy", "battles.parquet"},
+        {
+            "sae_model.pt", "sae_training_log.csv", "z_prompt.npy",
+            "battles.parquet", feature_names_file, feature_catalog_file,
+        },
     )
 
 
@@ -645,6 +729,16 @@ def _train_and_save_in_dir(e_a, e_b, battles, out_dir, *,
     if e_b is not None:
         source_arrays["e_b"] = e_b
     dataset_hash = _ordered_dataset_hash(metadata, source_arrays)
+    feature_names_file = _write_empty_feature_names(
+        out_dir, m_total=m_total, input_rep=input_rep
+    )
+    feature_catalog_file = _write_native_feature_catalog(
+        out_dir,
+        names_filename=feature_names_file,
+        m_total=m_total,
+        input_dim=int(config["input_dim"]),
+        input_rep=input_rep,
+    )
 
     # best_val starts at inf; if no epoch ever improved it stays non-finite,
     # which json writes as `Infinity` (invalid JSON for strict downstream readers)
@@ -696,6 +790,7 @@ def _train_and_save_in_dir(e_a, e_b, battles, out_dir, *,
     }
     expected_files = {
         "sae_model.pt", "sae_training_log.csv", "battles.parquet",
+        feature_names_file, feature_catalog_file,
         *(f"{name}.npy" for name in output_arrays),
     }
     if whiten and whiten != "none":

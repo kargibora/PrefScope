@@ -136,6 +136,8 @@ class FeatureCatalog:
             raise ValueError("unknown feature_space_status")
         if feature_space_id is None and feature_space_status != "unbound":
             raise ValueError("a bound feature-space status needs feature_space_id")
+        if feature_space_id is not None and feature_space_status == "unbound":
+            raise ValueError("an unbound feature space must not declare feature_space_id")
         raw_provenance["feature_space_status"] = feature_space_status
         checked_provenance = validate_portable_mapping(
             raw_provenance, where="feature catalog provenance"

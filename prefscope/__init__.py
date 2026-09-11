@@ -1,4 +1,4 @@
-"""PrefScope: analyze post-training preference data by concept with sparse autoencoders."""
+"""Backend-neutral feature extraction and numerical tools for post-training research."""
 
 import logging
 
@@ -13,7 +13,6 @@ from prefscope.core.lens_backend import (
     LensCapabilities,
     pair_item_metadata,
 )
-from prefscope.core.table_schema import TableContract
 from prefscope.core.representation import (
     CallableRepresentationSource,
     RepresentationBatch,
@@ -27,55 +26,27 @@ from prefscope.api.config import SAEConfig, TrainConfig
 from prefscope.api.encoded import load_feature_batch, save_feature_batch
 from prefscope.api.feature_activations import feature_activation_table
 from prefscope.api.feature_catalog import FeatureCatalog
-from prefscope.api.loaded_lens import Lens, LoadedLens
-from prefscope.api.preference import preference_relevance
+from prefscope.api.feature_catalog_io import (
+    decode_feature_catalog,
+    encode_feature_catalog,
+    load_feature_catalog,
+    save_feature_catalog,
+)
+from prefscope.api.loaded_lens import Lens
 from prefscope.api.representation import (
     EmbeddingRepresentationSource,
     PrecomputedRepresentationSource,
 )
-from prefscope.api.analysis import (
-    AnalysisArtifact,
-    AnalysisComponent,
-    AnalysisDataset,
-    AnalysisDatasetReference,
-    AnalysisPlan,
-    DatasetAnalysisResult,
-    LoadedAnalysisResult,
-    FeatureArtifactDiagnostics,
-    OutcomeAssociations,
-    OutcomeSpec,
-    PairedConceptShift,
-    PreferenceLengthConfounds,
-    PairedOutcomeShifts,
-    PairedOutcomeSpec,
-    PromptConditionedOutcomeShifts,
-    analyze_dataset,
-    load_analysis_result,
-    save_analysis_result,
-)
 from prefscope.analysis import (
-    diagnose,
-    evaluate_preference,
-    feature_preference_relevance,
+    activation_summary,
+    coactivation_counts,
+    coactivation_pairs,
+    cross_coactivation_counts,
+    top_activating_rows,
 )
-from prefscope.analysis import (
-    NormalizedOutcomes,
-    OutcomeAssociationResult,
-    associate_outcomes,
-    associate_outcomes_by_group,
-    concept_presence,
-    normalize_outcomes,
-    paired_concept_shift,
-    paired_concept_shift_by_region,
-    summarize_response_scope,
-)
-from prefscope.pipeline.compare import ResponseComparison, compare_encoded_responses
-from prefscope.pipeline.confounds import screen_length_confound
-from prefscope.pipeline.text_concepts import extract_text_concepts
-from prefscope.core import registry
-from prefscope.core.plugins import load_plugins
+from prefscope.reporting import Report
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Library convention: emit logs under the ``prefscope`` namespace but stay silent
 # unless the application attaches a handler / configures logging.
@@ -84,10 +55,6 @@ logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 def __getattr__(name):
     """Keep optional/heavy workflow internals out of a plain ``import prefscope``."""
-    if name in {"AnalyzeConfig", "run_analysis"}:
-        from prefscope.pipeline.analyze import AnalyzeConfig, run_analysis
-
-        return {"AnalyzeConfig": AnalyzeConfig, "run_analysis": run_analysis}[name]
     if name in {"SAELensProjector", "SAELensTextBackend"}:
         from prefscope.integrations.saelens import SAELensProjector, SAELensTextBackend
 
@@ -160,7 +127,6 @@ def load_lens(
 
 __all__ = [
     "Lens",
-    "LoadedLens",
     "load_lens",
     "PairItem",
     "Dataset",
@@ -175,58 +141,28 @@ __all__ = [
     "FeatureMatrix",
     "FeatureBatch",
     "FeatureCatalog",
+    "decode_feature_catalog",
+    "encode_feature_catalog",
+    "load_feature_catalog",
+    "save_feature_catalog",
     "feature_activation_table",
-    "TableContract",
-    "OutcomeSpec",
-    "AnalysisDataset",
-    "AnalysisArtifact",
-    "AnalysisComponent",
-    "FeatureArtifactDiagnostics",
-    "OutcomeAssociations",
-    "PreferenceLengthConfounds",
-    "PairedOutcomeShifts",
-    "PairedOutcomeSpec",
-    "PromptConditionedOutcomeShifts",
-    "PairedConceptShift",
-    "AnalysisPlan",
-    "DatasetAnalysisResult",
-    "AnalysisDatasetReference",
-    "LoadedAnalysisResult",
-    "analyze_dataset",
-    "load_analysis_result",
-    "save_analysis_result",
-    "preference_relevance",
     "load_feature_batch",
     "save_feature_batch",
     "TableDataset",
     "HuggingFaceDataset",
     "ColumnMapping",
     "prepare_dataset",
-    "AnalyzeConfig",
-    "run_analysis",
     "create_demo",
     "make_demo_corpus",
-    "extract_text_concepts",
     "SAEConfig",
     "TrainConfig",
     "SAELensProjector",
     "SAELensTextBackend",
-    "diagnose",
-    "evaluate_preference",
-    "feature_preference_relevance",
-    "NormalizedOutcomes",
-    "OutcomeAssociationResult",
-    "normalize_outcomes",
-    "associate_outcomes",
-    "associate_outcomes_by_group",
-    "concept_presence",
-    "paired_concept_shift",
-    "paired_concept_shift_by_region",
-    "summarize_response_scope",
-    "ResponseComparison",
-    "compare_encoded_responses",
-    "screen_length_confound",
-    "registry",
-    "load_plugins",
+    "Report",
+    "activation_summary",
+    "coactivation_counts",
+    "coactivation_pairs",
+    "cross_coactivation_counts",
+    "top_activating_rows",
     "__version__",
 ]

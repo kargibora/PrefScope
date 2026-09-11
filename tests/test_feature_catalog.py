@@ -9,9 +9,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope import FeatureCatalog, FeatureMatrix, feature_activation_table
+from prefscope import FeatureCatalog, FeatureMatrix, Lens, feature_activation_table
 from prefscope.integrations import NeuronpediaProvider
-from prefscope.api._feature_space import projector_feature_space_identity
+from prefscope.api._feature_space import (
+    lens_feature_space_identity,
+    projector_feature_space_identity,
+)
 from prefscope.presentation import FeatureTableRenderer
 
 
@@ -33,6 +36,56 @@ def test_external_coordinate_is_pinned_only_by_explicit_status():
         projector, input_rep="individual", backend="external"
     )
     assert pinned["feature_space_status"] == "declared_pinned_coordinate"
+
+
+
+
+def test_native_feature_space_identity_includes_whitening_artifact(tmp_path):
+    (tmp_path / "sae_model.pt").write_bytes(b"same weights")
+    lens = SimpleNamespace(
+        lens_dir=tmp_path,
+        input_rep="difference",
+        backend=SimpleNamespace(m_total=2, input_dim=3),
+    )
+    unwhitened = lens_feature_space_identity(lens)
+    (tmp_path / "whiten.npz").write_bytes(b"first transform")
+    whitened = lens_feature_space_identity(lens)
+    (tmp_path / "whiten.npz").write_bytes(b"second transform")
+    changed = lens_feature_space_identity(lens)
+
+    assert unwhitened["feature_space_status"] == "exact_weights"
+    assert len({unwhitened["feature_space_id"], whitened["feature_space_id"], changed["feature_space_id"]}) == 3
+
+
+def test_lens_feature_space_cache_tracks_whitener_add_change_and_remove(tmp_path):
+    (tmp_path / "sae_model.pt").write_bytes(b"weights")
+    lens = Lens.__new__(Lens)
+    lens.lens_dir = tmp_path
+    lens.input_rep = "difference"
+    lens.backend = SimpleNamespace(m_total=2, input_dim=3)
+    lens.projector = None
+
+    unwhitened = lens.feature_space_id
+    (tmp_path / "whiten.npz").write_bytes(b"first")
+    first = lens.feature_space_id
+    (tmp_path / "whiten.npz").write_bytes(b"second transform")
+    second = lens.feature_space_id
+    (tmp_path / "whiten.npz").unlink()
+    removed = lens.feature_space_id
+
+    assert len({unwhitened, first, second}) == 3
+    assert removed == unwhitened
+
+
+def test_catalog_rejects_identity_with_unbound_status():
+    with pytest.raises(ValueError, match="unbound.*must not declare"):
+        FeatureCatalog(
+            pd.DataFrame({"feature_id": [0], "name": ["zero"]}),
+            provenance={
+                "feature_space_id": "space-x",
+                "feature_space_status": "unbound",
+            },
+        )
 
 
 def test_catalog_validates_identity_columns_and_feature_ids():

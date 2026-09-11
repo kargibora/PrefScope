@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import runpy
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -68,9 +67,7 @@ class _Lens:
 def _patch_run(ns, monkeypatch, tmp_path):
     lens = _Lens()
     monkeypatch.setitem(ns, "Lens", SimpleNamespace(from_config=lambda path: lens))
-    monkeypatch.setitem(ns, "observe_run", lambda *args, **kwargs: nullcontext())
     monkeypatch.setitem(ns, "OUTPUT", tmp_path / "features")
-    monkeypatch.setitem(ns, "EVENTS", tmp_path / "events.jsonl")
     monkeypatch.setitem(ns, "save_feature_batch", lambda *args, **kwargs: None)
     return lens
 
@@ -81,7 +78,6 @@ def test_basic_gallery_cards_are_small_self_contained_scripts():
         assert len(text.splitlines()) <= 80
         assert "def main() -> None:" in text
         assert "argparse" not in text
-        assert "observe_run" in text
 
 
 def test_single_item_card_prints_activity(monkeypatch, tmp_path, capsys):
@@ -137,7 +133,6 @@ def test_training_card_builds_balanced_toy_pairs(monkeypatch, tmp_path, capsys):
     ns = _load(BASIC_EXAMPLES[3])
     output = tmp_path / "lens"
     monkeypatch.setitem(ns, "OUTPUT", output)
-    monkeypatch.setitem(ns, "observe_run", lambda *args, **kwargs: nullcontext())
     captured = {}
 
     def train(rows, *, config, out):
@@ -160,9 +155,6 @@ def test_outcome_association_card_runs_and_prints_estimand(
     monkeypatch, tmp_path, capsys
 ):
     ns = _load(BASIC_EXAMPLES[4])
-    monkeypatch.setitem(ns, "EVENTS", tmp_path / "events.jsonl")
-    monkeypatch.setitem(ns, "observe_run", lambda *args, **kwargs: nullcontext())
-
     ns["main"]()
 
     output = capsys.readouterr().out
@@ -172,8 +164,6 @@ def test_outcome_association_card_runs_and_prints_estimand(
 
 def test_preference_card_prints_descriptive_result(monkeypatch, tmp_path, capsys):
     ns = _load(BASIC_EXAMPLES[5])
-    monkeypatch.setitem(ns, "EVENTS", tmp_path / "events.jsonl")
-    monkeypatch.setitem(ns, "observe_run", lambda *args, **kwargs: nullcontext())
     lens = _Lens()
 
     def relevance(features):
@@ -188,7 +178,7 @@ def test_preference_card_prints_descriptive_result(monkeypatch, tmp_path, capsys
             }
         )
 
-    lens.preference_relevance = relevance
+    monkeypatch.setitem(ns, "preference_relevance", relevance)
     monkeypatch.setitem(ns, "Lens", SimpleNamespace(from_config=lambda path: lens))
 
     ns["main"]()

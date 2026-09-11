@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pandas as pd
 
-from prefscope.viewer_export.overview import (
+from prefscope.recipes.viewer_export.overview import (
     export_coactivation,
     export_concept_distribution,
     export_prompt_coactivation,

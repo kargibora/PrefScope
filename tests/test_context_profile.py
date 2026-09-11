@@ -1,13 +1,12 @@
 import numpy as np
 import pandas as pd
 
-from prefscope.analysis.context import (
+from prefscope.recipes.analysis.context import (
     _context_membership,
     classify_feature,
     profile_feature_context,
     profile_prompt_linkage,
 )
-from prefscope.cli import main
 
 
 def test_ambiguous_semantic_role_is_not_promoted_to_general():
@@ -141,69 +140,6 @@ def test_prompt_linkage_separates_linked_unlinked_and_sparse_features():
     assert result.loc[2, "prompt_scope"] == "insufficient_evidence"
     assert result.loc[0, "paired_choice_ratio"] == 1.0
     assert result.loc[1, "n_linked_prompt_contexts"] == 1
-
-
-def test_context_profile_cli_runs_llm_free_without_calibration(tmp_path):
-    completion_lens = tmp_path / "completion"
-    prompt_lens = tmp_path / "prompt"
-    completion_lens.mkdir()
-    prompt_lens.mkdir()
-    contexts = np.repeat(np.arange(4), 100)
-    ids = np.asarray([f"battle-{i}" for i in range(len(contexts))])
-    meta = pd.DataFrame({
-        "instruction_id": ids,
-        "model_a": "model-a",
-        "model_b": "model-b",
-    })
-    meta.to_parquet(completion_lens / "battles.parquet", index=False)
-    meta.assign(battle_id=ids).to_parquet(
-        prompt_lens / "battles.parquet", index=False
-    )
-    z_a = np.zeros((len(contexts), 1), dtype=np.float32)
-    z_a[np.flatnonzero(contexts == 0)[:80], 0] = 2.0
-    np.save(completion_lens / "z_a.npy", z_a)
-    np.save(completion_lens / "z_b.npy", np.zeros_like(z_a))
-    z_prompt = np.zeros((len(contexts), 4), dtype=np.float32)
-    for context in range(4):
-        rows = np.flatnonzero(contexts == context)
-        z_prompt[rows, context] = np.linspace(2.0, 1.0, len(rows))
-    np.save(prompt_lens / "z_prompt.npy", z_prompt)
-
-    names = tmp_path / "features.csv"
-    pd.DataFrame({
-        "feature_id": [0],
-        "concept": ["uses a response policy"],
-        "fidelity_pass": [True],
-    }).to_csv(names, index=False)
-    prompt_names = tmp_path / "prompt_names.csv"
-    prompt_fidelity = tmp_path / "prompt_fidelity.csv"
-    pd.DataFrame({
-        "feature_id": range(4),
-        "concept": ["safety", "coding", "math", "writing"],
-    }).to_csv(prompt_names, index=False)
-    pd.DataFrame({
-        "feature_id": range(4),
-        "concept": ["safety", "coding", "math", "writing"],
-        "fidelity_pass": True,
-    }).to_csv(prompt_fidelity, index=False)
-    out = tmp_path / "scope.csv"
-
-    code = main([
-        "context-profile",
-        "--completion-lens", str(completion_lens),
-        "--prompt-lens", str(prompt_lens),
-        "--names", str(names),
-        "--prompt-names", str(prompt_names),
-        "--prompt-fidelity", str(prompt_fidelity),
-        "--out", str(out),
-        "--top-n", "80",
-        "--prompt-tail-fractions", "0.1", "0.15", "0.2",
-    ])
-
-    assert code == 0
-    result = pd.read_csv(out)
-    assert result.loc[0, "prompt_scope"] == "prompt_linked"
-    assert result.loc[0, "scope_method"] == "stable_prompt_tail_enrichment"
 
 
 def test_context_membership_rejects_nan_and_preserves_mixed_label_types():

@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.pipeline.confounds import partial_correlation, screen_length_confound
+from prefscope.recipes.pipeline.confounds import partial_correlation, screen_length_confound
 
 
 def test_length_confound_screen_handles_perfect_collinearity_without_false_verdict():
