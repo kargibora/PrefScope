@@ -1,24 +1,23 @@
 # PrefScope
 
-This checkout contains the `0.3` alpha API.
+PrefScope is a framework for analyzing post-training preference data by concept.
+Reusable lenses turn prompts and model responses into feature activations. You can
+inspect these features, compare responses, and study how features relate to preference.
 
-PrefScope turns paired model responses into feature activations through a reusable lens.
-Its supported flow is deliberately small:
+Train a sparse autoencoder lens, load a pretrained SAELens checkpoint, or connect your
+own backend. Each lens returns feature matrices with row and feature IDs:
 
 ```text
 PairItem -> Lens.featurize(...) -> FeatureBatch / FeatureMatrix
 ```
 
-The package also provides a few numerical helpers, explicit feature annotations, and a
-small `Report` container. It does not decide what features mean, run an automatic
-analysis plan, or turn activity into scientific claims.
-
-> PrefScope is a research tool. Its outputs are not evidence of model quality, reward,
-> causality, safety, or generator behavior without a separate study design.
+Use these matrices to summarize feature activity, find high-activation examples, measure
+feature overlap, and run your own analyses. Feature catalogs attach names and annotations;
+reports save results as JSON and CSV; the Viewer displays exported feature data.
 
 ## Install
 
-For this development version, install from a source checkout:
+Clone the repository and install with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 git clone https://github.com/kargibora/PrefScope.git
@@ -28,8 +27,6 @@ source .venv/bin/activate  # macOS/Linux
 ```
 
 On Windows PowerShell, activate with `.venv\Scripts\Activate.ps1`.
-`pip install prefscope` installs the latest published version, which may have a different
-API.
 
 Choose optional capabilities with extras:
 
@@ -75,39 +72,26 @@ You can also use precomputed representations or construct a lens from a custom
 [Python API](docs/reference/python-api.md) and
 [representation guide](docs/explanation/representations.md).
 
-## Run small numerical operations
+## Summarize feature activity
 
-The supported analysis surface consists of ordinary functions over `FeatureMatrix`:
+Run numerical functions directly on a `FeatureMatrix`:
 
 ```python
-from prefscope import activation_summary, coactivation_pairs, top_activating_rows
+from prefscope import activation_summary, top_activating_rows
 
 summary = activation_summary(z_a)
 top_rows = top_activating_rows(z_a, k=5)
-
-from prefscope import FeatureMatrix
-
-presence = FeatureMatrix(
-    values=caller_defined_presence,
-    row_ids=z_a.row_ids,
-    feature_ids=z_a.feature_ids,
-    role="presence",
-    orientation="absolute",
-    activation_polarity="boolean",
-    code_semantics="semantic_presence",
-    provenance={"presence_basis": ["defined by the caller"]},
-)
-overlaps = coactivation_pairs(presence, min_count=2)
 ```
 
-These functions preserve `feature_id` and `row_id`. They do not name features, select a
-statistical protocol, infer causality, or define semantic presence from raw activity.
-The full supported list is in [Numerical analysis](docs/reference/python-api.md#numerical-analysis).
+Summaries retain feature IDs. Top-row results also include row IDs for joining to source
+examples. Coactivation helpers measure feature overlap from boolean matrices using a
+membership rule you choose. See
+[Numerical analysis](docs/reference/python-api.md#numerical-analysis) for the full list.
 
-## Keep annotations separate
+## Attach feature names
 
-`FeatureCatalog` stores display annotations. Activations and annotations join explicitly
-through `feature_id`:
+`FeatureCatalog` stores feature names and source annotations separately from numerical
+activations. Join them through `feature_id`:
 
 ```python
 from prefscope import FeatureCatalog, feature_activation_table
@@ -116,10 +100,9 @@ catalog = FeatureCatalog.from_mapping({0: "brevity", 4: "step-by-step structure"
 table = feature_activation_table(z_a, catalog=catalog)
 ```
 
-A catalog label is a proposed annotation. It is not a verified scientific conclusion.
-Feature-space identity prevents accidental joins between different coordinate systems.
+Catalog joins use feature IDs and check feature-space identity when available.
 
-## Collect caller-owned results
+## Save analysis results
 
 ```python
 from prefscope import Report
@@ -133,30 +116,27 @@ report = Report(
 report.save("results/report")
 ```
 
-`Report` stores finite numerical metrics, pandas tables, and JSON metadata. It does not
-compile analyses, filter private data, render narrative, or interpret columns. The caller
-owns those choices.
+`Report` saves your metrics and metadata in `report.json`, with pandas tables in separate
+CSV files. Use a new output directory for each report.
 
 ## Specialized recipes
 
-Specialized preference, outcome, context, graph, clustering, and reporting code is kept
-under `prefscope.recipes`. Recipes are direct Python modules that can be copied or adapted.
-They are not exported from `prefscope`, registered as analysis components, or run
-automatically. Their APIs may change between releases.
+`prefscope.recipes` contains preference statistics, outcome associations, context analysis,
+feature graphs, clustering, and reporting tools. Import the modules directly or adapt them
+for your study. See [Specialized analyses](docs/recipes/specialized-analysis.md).
 
 ## Visualization bridge
 
-`prefscope.viewer_export.export_viewer_bundle(...)` packages already-computed
-`FeatureBatch`, optional `FeatureCatalog`, and caller-provided tables with an explicit,
-already-built `@prefscope/viewer` static site. It copies that build unchanged, adds
-`data/viewer-data.json`, and writes a hashed file inventory. It does not build the Viewer
-or calculate maps, distributions, examples, coactivation, or report semantics.
+`prefscope.viewer_export.export_viewer_bundle(...)` packages feature batches, optional
+catalogs, and analysis tables with a built `@prefscope/viewer` static site. Compute your
+tables and maps in Python, then pass them to the exporter along with the Viewer build.
+The resulting directory contains the site, `data/viewer-data.json`, and a hashed file
+inventory.
 
 ## CLI
 
-The CLI covers dataset preparation, lens construction, feature extraction, naming, and
-interpretation. Analysis and report orchestration commands were intentionally removed.
-Use direct Python functions for analysis.
+Use the CLI to prepare datasets, build and inspect lenses, and name and verify features.
+Use Python functions for analysis.
 
 ```bash
 prefscope --help
