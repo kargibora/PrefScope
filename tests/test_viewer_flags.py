@@ -2,9 +2,10 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from prefscope.viewer_export.features import export_features, export_meta
-from prefscope.viewer_export.tables import (
+from prefscope.recipes.viewer_export.features import export_features, export_meta
+from prefscope.recipes.viewer_export.tables import (
     export_conditional,
     export_delta,
     export_prompt_features,
@@ -133,3 +134,10 @@ def test_prompt_feature_export_keeps_named_axes_without_fidelity_rows(tmp_path):
     by_id = {row["feature_id"]: row for row in exported["features"]}
     assert by_id[1]["fidelity_pass"] is True
     assert by_id[0]["fidelity_pass"] is None
+
+
+@pytest.mark.parametrize("value", [None, np.nan, "", "   ", "nan", " NaN "])
+def test_label_helper_falls_back_for_blank_values(value):
+    from prefscope.recipes.viewer_export.sanitize import _label_or_id
+
+    assert _label_or_id(value, 7) == "feature 7"

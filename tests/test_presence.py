@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.analysis.presence import annotation_flag, concept_presence, feature_thresholds
+from prefscope.recipes.analysis.presence import annotation_flag, concept_presence, feature_thresholds
 
 
 def _annotations():

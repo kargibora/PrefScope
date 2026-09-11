@@ -1,4 +1,4 @@
-"""Pure data contracts for the PrefScope framework (numpy/typing only)."""
+"""Pure data objects for PrefScope (NumPy and typing only)."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -14,7 +14,7 @@ class PairItem:
     y_a: str
     y_b: str | None = None
     pref: float | None = None    # P(A preferred); 0.0 = B wins, 0.5 = tie
-    model_a: str | None = None   # which model produced y_a (needed by diagnose)
+    model_a: str | None = None   # which model produced y_a
     model_b: str | None = None   # which model produced y_b
     meta: dict = field(default_factory=dict)
 

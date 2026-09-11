@@ -1,6 +1,6 @@
 import pandas as pd
 
-from prefscope.viewer_export.clusters import export_feature_clusters
+from prefscope.recipes.viewer_export.clusters import export_feature_clusters
 
 
 def test_cluster_export_is_self_contained_and_keeps_unclustered_axes():
@@ -52,6 +52,8 @@ def test_cluster_export_is_self_contained_and_keeps_unclustered_axes():
     assert by_id[8]["n_named"] == 2
     assert by_id[8]["n_verified"] == 1
     assert by_id[9]["label"] == "Language"
+    assert by_id[9]["representative_concepts"] == "feature 2"
+    assert by_id[9]["members"][0]["concept"] == "feature 2"
 
 
 def test_cluster_export_validates_kind_and_required_columns():

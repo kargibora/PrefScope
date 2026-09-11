@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from prefscope.analysis.sae_selection import (
+from prefscope.recipes.analysis.sae_selection import (
     evaluate_sweep, expansion_ratio, recommend_config,
 )
 

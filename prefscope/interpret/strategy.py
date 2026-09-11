@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from prefscope.artifacts import BATTLES, MANIFEST, Z_A, Z_B, Z_PROMPT, lens_battle_ids
+from prefscope.artifacts import BATTLES, MANIFEST, Z_A, Z_B, Z_PROMPT
 from prefscope.core import registry
 from prefscope.core.manifest import LensManifest
 from prefscope.interpret.io import load_lens_battles
@@ -43,11 +43,24 @@ def _load_prompt_lens(lens_dir, corpus):
     input_rep = manifest.input_rep
     z_prompt = np.load(lens_dir / Z_PROMPT, mmap_mode="r")
     meta = pd.read_parquet(lens_dir / BATTLES)
-    bid = lens_battle_ids(meta)
+    row_id_column = "instruction_id" if "instruction_id" in meta.columns else "battle_id"
+    row_ids = meta[row_id_column].astype(str)
     corp = load_corpus(corpus)
-    corp["battle_id"] = corp["battle_id"].astype(str)
-    prompts = pd.Series(bid).map(corp.set_index("battle_id")["prompt"]).fillna("").tolist()
-    return (input_rep, meta, list(bid), z_prompt, prompts,
+    if row_id_column not in corp.columns:
+        raise ValueError(f"prompt corpus has no {row_id_column!r} identity column")
+    corpus_rows = corp.assign(**{row_id_column: corp[row_id_column].astype(str)}).set_index(
+        row_id_column
+    )
+    prompts = row_ids.map(corpus_rows["prompt"])
+    if prompts.isna().any():
+        raise ValueError(
+            f"prompt corpus is missing {int(prompts.isna().sum())} lens row identities"
+        )
+    split_rows = (
+        meta if {"group_id", "prompt"} & set(meta.columns)
+        else corpus_rows.loc[row_ids]
+    )
+    return (input_rep, meta, split_group_ids(split_rows), z_prompt, prompts.tolist(),
             manifest.activation_polarity or "unknown",
             manifest.code_semantics or "custom")
 

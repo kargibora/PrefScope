@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "prefscope"
-version = "0.2.0"
-description = "PrefScope: an interpretability framework for diagnosing post-training data and model behavior with sparse autoencoders."
+version = "0.3.0"
+description = "Backend-neutral feature extraction and numerical tools for post-training research."
 license = { text = "MIT" }
 authors = [{ name = "Bora Kargı" }]
 keywords = ["interpretability", "post-training", "preference-data", "sparse-autoencoder", "llm"]
@@ -23,7 +23,7 @@ classifiers = [
 readme = "README.md"
 requires-python = ">=3.10"
 # Runtime deps are the ones the `prefscope` package actually imports. Heavy optional
-# backends (embedding accelerators, viewer, clustering) live in extras below.
+# backends (embedding accelerators and clustering) live in extras below.
 # scipy + pyyaml were imported but only available transitively — declared here now.
 # sentence-transformers / matplotlib were declared but unused by the package (embedding
 # goes through an OpenAI-compatible endpoint; plotting lives in the extras).
@@ -44,11 +44,8 @@ dependencies = [
 
 [project.scripts]
 prefscope = "prefscope.cli:console_main"
-# Clear preferred name for the static JSON-bundle exporter.  Keep
-# ``prefscope-viewer`` below for compatibility with existing workflows.
+# Export a versioned visualization-data bundle for external visualization libraries.
 prefscope-export-viewer = "prefscope.viewer_export.cli:main"
-prefscope-viewer = "prefscope.viewer_export.cli:main"
-prefscope-view = "prefscope.viewer.launch:main"
 
 [project.urls]
 Homepage = "https://github.com/kargibora/PrefScope"
@@ -57,8 +54,6 @@ Documentation = "https://github.com/kargibora/PrefScope/tree/main/docs"
 Issues = "https://github.com/kargibora/PrefScope/issues"
 
 [project.optional-dependencies]
-# Optional visualization dependencies.
-plots = ["matplotlib>=3.8"]
 # Generic PyTorch extras. For a particular CUDA/ROCm build, install PyTorch from
 # its official platform index first; package metadata cannot carry uv-only indexes.
 cpu = ["torch>=2.3"]
@@ -66,11 +61,6 @@ torch = ["torch>=2.3"]
 # Optional pretrained internal-activation SAE backend. Keep this out of the base
 # install because SAELens brings TransformerLens and a full model-analysis stack.
 saelens = ["sae-lens>=6.50,<7"]
-viewer = [
-    "streamlit>=1.36",
-    "plotly>=5.22",
-    "umap-learn>=0.5.7",
-]
 arena = [
     "datasets>=2.14",
 ]

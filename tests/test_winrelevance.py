@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from prefscope.pipeline.winrelevance import win_relevance, win_relevance_logistic
+from prefscope.recipes.pipeline.winrelevance import win_relevance, win_relevance_logistic
 
 
 def test_win_relevance_detects_rewarded_feature():

@@ -31,8 +31,16 @@ class LengthBackend(LensBackend):
             difference="a_minus_b_after_encoding",
         )
 
+    @property
+    def feature_space_identity(self):
+        return {
+            "feature_space_id": "length-and-word-count-v1",
+            "feature_space_status": "declared_pinned_coordinate",
+        }
+
     def featurize(self, items, *, views=None, feature_ids=None, batch_size=None):
-        del batch_size
+        if batch_size is not None:
+            raise ValueError("LengthBackend does not support per-call batch_size")
         rows = list(items)
         requested = tuple(views or self.capabilities.views)
         selected = (
@@ -116,36 +124,34 @@ A backend must:
 - return a `FeatureBatch` with exactly aligned row IDs;
 - preserve requested feature IDs and their order; without a selection, return every
   ID in `range(m_total)`;
+- honor an explicit `batch_size` or raise `ValueError` if it is unsupported;
 - declare prompt, response, and contrast capabilities before encoding;
 - distinguish direct contrast projection from A-minus-B after per-side encoding;
 - keep heavy optional imports inside construction or `featurize`;
 - record portable provenance without credentials;
 - label raw activity as numerical activity, not semantic presence.
 
+Change `feature_space_id` whenever coordinate order, meaning, preprocessing, or
+projection changes. Leave the inherited unbound identity when no stable contract can be
+declared. `Lens.featurize(...)` validates and carries a bound declaration into every
+output.
+
 `Lens.featurize` adds canonical prompt/response/preference/model/length metadata from
 the `PairItem` rows and validates the shared contract. A backend only needs to return
-backend-specific extra metadata. Historical `encode`, `encode_items`, and
-`encode_pairs` continue to return their existing ndarray/DataFrame forms and delegate to
-the backend when possible.
+backend-specific extra metadata. Public feature extraction always returns `FeatureBatch`.
 
-## YAML extension
+## Use the backend
 
-Register a backend only after an explicit plug-in import:
+Construct the backend directly and wrap it with `Lens`:
 
 ```python
-from prefscope.core import registry
+from prefscope import Lens
 
-@registry.register("lens_backend", "my-backend")
-class MyBackend(...):
-    ...
+backend = MyBackend(...)
+lens = Lens.from_backend(backend)
+features = lens.featurize(items)
 ```
 
-```yaml
-version: 1
-backend: my-backend
-options:
-  endpoint: http://localhost:8000
-```
-
-Then `Lens.from_config("lens.yaml")` resolves the registered backend. PrefScope never
-scans installed packages for plug-ins.
+PrefScope does not require registration or a plug-in module for custom backends. If a
+project wants configuration-driven construction, keep that policy in the project rather
+than adding it to the shared analysis API.

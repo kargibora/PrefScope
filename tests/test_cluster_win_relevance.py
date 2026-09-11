@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 
-from prefscope.pipeline.winrelevance import cluster_win_relevance
+from prefscope.recipes.pipeline.winrelevance import cluster_win_relevance
 
 
 def test_cluster_win_relevance_aggregates_and_scores():

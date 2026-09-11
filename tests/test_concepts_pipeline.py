@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from prefscope.api.loaded_lens import Lens
-from prefscope.pipeline.concepts import export_concepts
+from prefscope.recipes.pipeline.concepts import export_concepts
 
 
 class _Projector:

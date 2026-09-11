@@ -1,0 +1,4 @@
+version: 1
+backend: prefscope
+source: ../../example-output/training/completion-lens
+device: cpu

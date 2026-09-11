@@ -302,8 +302,7 @@ def run_encode_dataset(lens_dir, data, out, *, embedder,
 
     ``meta.parquet`` uses the CANONICAL pair-schema names (``prompt`` / ``completion_a`` /
     ``completion_b`` / ``model_a`` / ``model_b`` / ``human_pref``), whatever the source
-    columns were called — so the downstream analytics (orientation, win-relevance, report)
-    work on a BYO dataset exactly as on the Arena corpus. On input, a default column name
+    columns were called — so downstream caller code can use the same fields across datasets. On input, a default column name
     that is absent falls back to its canonical twin (``response`` -> ``completion_a`` etc.),
     so an already-canonical dataset needs no flags."""
     lens_dir, data, out = Path(lens_dir), Path(data), Path(out)

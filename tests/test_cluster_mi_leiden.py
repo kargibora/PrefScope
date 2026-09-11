@@ -1,6 +1,6 @@
 import numpy as np
 
-from prefscope.pipeline.cluster import (
+from prefscope.recipes.pipeline.cluster import (
     _postprocess_small_communities,
     _sparsify_affinity,
     cluster_features,

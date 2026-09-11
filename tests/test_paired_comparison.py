@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.analysis.paired import (
+from prefscope.recipes.analysis.paired import (
     paired_concept_shift,
     paired_concept_shift_by_region,
     summarize_response_scope,

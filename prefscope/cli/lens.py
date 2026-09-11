@@ -1,78 +1,10 @@
-"""CLI handlers for reusable lens packaging and single-text inference."""
+"""CLI handler for reusable lens packaging."""
 
 from __future__ import annotations
 
 import json
 import shutil
 from pathlib import Path
-
-import numpy as np
-import pandas as pd
-
-
-def _display_concepts(title: str, rows: list[dict], *, policy: str) -> None:
-    print(f"\n{title}\n{'=' * len(title)}")
-    if not rows:
-        print("No named concepts passed the requested filters.")
-        if policy == "calibrated":
-            print(
-                "The lens may lack passing semantic calibration; use --presence-policy "
-                "mixed only for explicitly exploratory activations."
-            )
-        return
-    display = pd.DataFrame(rows)
-    display.insert(0, "rank", np.arange(1, len(display) + 1))
-    columns = [
-        "rank",
-        "feature_id",
-        "activation",
-        "presence_basis",
-        "concept",
-        *[
-            name
-            for name in ("correlation", "agreement", "semantic_role")
-            if name in display.columns
-        ],
-    ]
-    print(display[columns].to_string(index=False, max_colwidth=72))
-    if display["presence_basis"].eq("positive_nonzero").any():
-        print(
-            "\nNote: positive_nonzero is exploratory SAE activity, not a calibrated "
-            "semantic-presence claim."
-        )
-
-
-def _cmd_extract_concepts(args) -> int:
-    from prefscope.pipeline.text_concepts import extract_text_concepts
-
-    top = None if args.top == 0 else args.top
-    result = extract_text_concepts(
-        args.prompt,
-        args.completion,
-        repo_id=args.repo,
-        prompt_lens=args.prompt_lens,
-        completion_lens=args.completion_lens,
-        prompt_subfolder=args.prompt_subfolder,
-        completion_subfolder=args.completion_subfolder,
-        revision=args.revision,
-        device=args.device,
-        presence_policy=args.presence_policy,
-        fidelity_only=not args.include_unverified,
-        top=top,
-    )
-    if args.json:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-    else:
-        if "prompt" in result:
-            _display_concepts(
-                "Prompt concepts", result["prompt"], policy=args.presence_policy
-            )
-        if "completion" in result:
-            _display_concepts(
-                "Completion concepts", result["completion"], policy=args.presence_policy
-            )
-    return 0
-
 
 def _cmd_package_lens(args) -> int:
     from prefscope.api.loaded_lens import Lens
@@ -100,4 +32,4 @@ def _cmd_package_lens(args) -> int:
     return 0
 
 
-__all__ = ["_cmd_extract_concepts", "_cmd_package_lens"]
+__all__ = ["_cmd_package_lens"]

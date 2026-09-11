@@ -1,7 +1,59 @@
 # Changelog
 
 Notable user-visible changes are recorded here. PrefScope follows semantic versioning;
-the `0.2` series is an alpha API and may still evolve with explicit release notes.
+the `0.x` series is an alpha API and may still evolve with explicit release notes.
+
+## 0.3.0 — Unreleased
+
+This is a breaking change from `0.2`. Removed imports and commands have no compatibility
+aliases.
+The package version is prepared for `0.3.0`; this branch does not publish a PyPI release.
+
+- Fixed boolean top-row ranking, protected existing report directories from implicit
+  replacement, and used unique temporary files for catalog writes.
+- Bound loaded native feature identity to the loaded weights and whitener. Publishing
+  refuses backing files that changed after loading instead of assigning them the old
+  lens identity.
+- Fixed prompt naming with battle-ID-only metadata and retained prompt-group splits.
+  Removed stale interpretation help and unused dispatch code.
+- Fixed the UMAP example to select real A/B views from normal individual-lens batches
+  without mixing their derived difference into the answer map. Added offline example
+  coverage in CI.
+- Removed duplicate metadata assembly and unnecessary feature-array copies without
+  changing row order, feature selection, or orientation checks.
+
+- Native representation lenses now reject an unsupported per-call `batch_size`
+  instead of ignoring it. Configure native embedding batches with `embed_batch_size`
+  when loading the lens. Documented backend batching and the single `featurize` entry
+  point; no analysis or reporting API was added.
+
+- Added a caller-owned prompt-taxonomy example with signed feature identities,
+  deterministic evidence, auditable CSV output and resumable OpenRouter runs.
+  It does not validate feature names or expand the core catalog schema.
+
+- Replaced the analysis-component, fixed-schema, and automatic orchestration layers with
+  direct numerical functions over `FeatureMatrix`.
+- Added a caller-owned `Report` container for finite numerical metrics, pandas tables,
+  and JSON metadata. The report compiler, privacy policy, lineage schema, and
+  observability layers from the unmerged reporting branch are not part of this API.
+- Moved specialized preference, outcome, context, graph, cluster, pipeline, and historical
+  viewer-preparation code to unexported `prefscope.recipes` modules.
+- Removed analysis/report/workflow CLI commands and the observability event framework
+  without compatibility shims.
+- Added separate `FeatureCatalog` annotations, explicit feature-ID joins, simple JSON
+  catalog persistence, and feature-space identity checks. Native lens publication
+  bundles the catalog without inventing names for unnamed features.
+- Simplified saved `FeatureBatch` directories to ordinary local artifacts. Old encoded
+  and reporting-development bundle readers are not retained.
+- Added expected loaded-SAE-state digest checks for SAELens. Reader identity and remote
+  checkpoint acquisition remain explicitly unpinned.
+- Reorganized examples by task, with plain or Rich feature tables and explicit
+  Neuronpedia annotations. Model and live-service examples remain opt-in.
+- Reduced `prefscope.viewer_export` to a serializer for existing feature data,
+  annotations, and caller-provided tables. It now requires an explicit compatible built
+  Viewer and packages a new static-site directory with deterministic hashes. It refuses
+  to overwrite an existing destination and does not build the Viewer or run
+  analysis/report orchestration.
 
 ## 0.2.0 — 2026-09-01
 

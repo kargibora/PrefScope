@@ -23,6 +23,24 @@ def _lens_and_ann(tmp_path):
     return apath
 
 
+def test_interpret_name_rejects_overwriting_bundled_names(tmp_path, capsys):
+    ann = _lens_and_ann(tmp_path)
+    rc = cli.main(
+        [
+            "interpret",
+            "name",
+            "--lens-dir",
+            str(tmp_path),
+            "--annotations",
+            str(ann),
+            "--out",
+            str(tmp_path / "feature_names.csv"),
+        ]
+    )
+    assert rc == 2
+    assert "must not overwrite the lens bundle" in capsys.readouterr().err
+
+
 def test_interpret_name_writes_csv(tmp_path, monkeypatch):
     ann = _lens_and_ann(tmp_path)
     captured = {}
@@ -37,7 +55,7 @@ def test_interpret_name_writes_csv(tmp_path, monkeypatch):
     # dispatch now goes CLI -> registry strategy -> name_features (looked up lazily)
     monkeypatch.setattr("prefscope.interpret.name.name_features", fake_name_features)
     monkeypatch.setattr(cli_common, "LLMClient", lambda **kw: object())
-    out_csv = tmp_path / "feature_names.csv"
+    out_csv = tmp_path / "results" / "feature_names.csv"
     rc = cli.main(["interpret", "name", "--lens-dir", str(tmp_path),
                    "--annotations", str(ann), "--out", str(out_csv),
                    "--model", "deepseek/deepseek-v3.2"])

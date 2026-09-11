@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from prefscope import Lens, load_feature_catalog
 from prefscope.pipeline.build_lens import (
     build_lens, build_lens_from_embeddings, build_prompt_lens)
 from prefscope.encode.sae import SAEProjector
@@ -127,6 +128,12 @@ def test_build_prompt_lens_auto_uses_nonnegative_sae_and_no_matryoshka(tmp_path)
     assert out["matryoshka_prefix_lengths"] == []
     assert len(out["dataset_hash"]) == 64
     assert (np.load(out_dir / "z_prompt.npy") >= 0).all()
+    names = pd.read_csv(out_dir / "prompt_feature_names.csv")
+    assert names["feature_id"].tolist() == list(range(8))
+    assert names["concept"].isna().all()
+    catalog = load_feature_catalog(out_dir / "feature_catalog.json")
+    assert catalog.feature_ids == tuple(range(8))
+    assert catalog.feature_space_status == "exact_weights"
     assert not (out_dir / "whiten.npz").exists()
     assert not (out_dir / "stale.txt").exists()
 
@@ -372,9 +379,30 @@ def test_rebuild_replaces_whole_completion_directory(tmp_path):
 
     expected = {
         "manifest.json", "sae_model.pt", "sae_training_log.csv",
-        "battles.parquet", "z_diff.npy",
+        "battles.parquet", "z_diff.npy", "feature_names.csv",
+        "feature_catalog.json",
     }
     assert {path.name for path in out_dir.iterdir()} == expected
+    names = pd.read_csv(out_dir / "feature_names.csv")
+    assert names["feature_id"].tolist() == list(range(8))
+    assert names["concept"].isna().all()
+    catalog = load_feature_catalog(out_dir / "feature_catalog.json")
+    assert catalog.feature_ids == tuple(range(8))
+    assert catalog.feature_space_status == "exact_weights"
+    loaded = Lens.from_dir(out_dir, device="cpu")
+    assert catalog.feature_space_id == loaded.feature_space_id
+    assert loaded.feature_catalog.provenance["names_artifact"] == "feature_names.csv"
+    assert loaded.concept_names is None
+    catalog_path = out_dir / "feature_catalog.json"
+    catalog_blob = tmp_path / "catalog-blob.json"
+    catalog_path.rename(catalog_blob)
+    catalog_path.symlink_to(catalog_blob)
+    hub_style = Lens.from_dir(out_dir, device="cpu")
+    assert hub_style.feature_catalog.feature_space_id == hub_style.feature_space_id
+    names_path = out_dir / "feature_names.csv"
+    names_path.write_bytes(names_path.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="names provenance"):
+        _ = loaded.feature_catalog
     assert json.loads((out_dir / "manifest.json").read_text()) == manifest
 
 
@@ -496,7 +524,9 @@ def test_dataset_hash_rejects_lossy_array_dtypes_and_ambiguous_metadata():
 
 
 def test_transaction_rejects_active_publication_lock(tmp_path):
+    import fcntl
     import importlib
+    import os
     import socket
     import uuid
 
@@ -508,21 +538,28 @@ def test_transaction_rejects_active_publication_lock(tmp_path):
         "hostname": socket.gethostname(),
         "owner_id": uuid.uuid4().hex,
     }))
+    descriptor = os.open(lock, os.O_RDWR | os.O_NOFOLLOW)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     called = False
 
     def builder(staging):
         nonlocal called
         called = True
 
-    with pytest.raises(RuntimeError, match="another active publisher"):
-        module._transactional_build(destination, builder)
+    try:
+        with pytest.raises(RuntimeError, match="another active publisher"):
+            module._transactional_build(destination, builder)
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
     assert called is False
     assert lock.exists()
 
 
-def test_transaction_removes_identifiable_stale_lock(tmp_path, monkeypatch):
+def test_transaction_ignores_stale_metadata_without_unlinking_lock(tmp_path):
     import importlib
     import socket
+    import stat
     import uuid
 
     module = importlib.import_module("prefscope.pipeline.build_lens")
@@ -533,7 +570,7 @@ def test_transaction_removes_identifiable_stale_lock(tmp_path, monkeypatch):
         "hostname": socket.gethostname(),
         "owner_id": uuid.uuid4().hex,
     }))
-    monkeypatch.setattr(module, "_pid_is_alive", lambda pid: False)
+    original_identity = (lock.stat().st_dev, lock.stat().st_ino)
 
     module._transactional_build(
         destination,
@@ -541,19 +578,26 @@ def test_transaction_removes_identifiable_stale_lock(tmp_path, monkeypatch):
     )
 
     assert (destination / "new.txt").read_text() == "new"
-    assert not lock.exists()
+    assert (lock.stat().st_dev, lock.stat().st_ino) == original_identity
+    assert stat.S_ISREG(lock.stat(follow_symlinks=False).st_mode)
+    assert lock.stat().st_mode & 0o777 == 0o600
 
 
-def test_transaction_refuses_unidentifiable_lock(tmp_path):
+def test_transaction_ignores_invalid_metadata_without_unlinking_lock(tmp_path):
     import importlib
+    import stat
 
     module = importlib.import_module("prefscope.pipeline.build_lens")
     lock = tmp_path / ".lens.lock"
     lock.write_text("not valid lock metadata")
+    original_identity = (lock.stat().st_dev, lock.stat().st_ino)
 
-    with pytest.raises(RuntimeError, match="refusing to remove"):
-        module._transactional_build(tmp_path / "lens", lambda staging: None)
-    assert lock.read_text() == "not valid lock metadata"
+    module._transactional_build(tmp_path / "lens", lambda staging: None)
+
+    assert (tmp_path / "lens").is_dir()
+    assert (lock.stat().st_dev, lock.stat().st_ino) == original_identity
+    assert stat.S_ISREG(lock.stat(follow_symlinks=False).st_mode)
+    assert lock.stat().st_mode & 0o777 == 0o600
 
 
 def test_transaction_recovers_sole_orphan_backup_before_build(tmp_path):
@@ -574,7 +618,9 @@ def test_transaction_recovers_sole_orphan_backup_before_build(tmp_path):
         module._transactional_build(destination, fail)
     assert (destination / "old.txt").read_text() == "old"
     assert not backup.exists()
-    assert not (tmp_path / ".lens.lock").exists()
+    lock = tmp_path / ".lens.lock"
+    assert lock.is_file() and not lock.is_symlink()
+    assert lock.stat().st_mode & 0o777 == 0o600
 
 
 def test_transaction_uses_uuid_staging_and_backup_names(tmp_path, monkeypatch):
@@ -623,4 +669,6 @@ def test_transaction_refuses_ambiguous_orphan_backups(tmp_path):
         module._transactional_build(tmp_path / "lens", builder)
     assert called is False
     assert len(list(tmp_path.glob(".lens.bak-*"))) == 2
-    assert not (tmp_path / ".lens.lock").exists()
+    lock = tmp_path / ".lens.lock"
+    assert lock.is_file() and not lock.is_symlink()
+    assert lock.stat().st_mode & 0o777 == 0o600

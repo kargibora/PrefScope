@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.analysis.elicitation import (
+from prefscope.recipes.analysis.elicitation import (
     prompt_response_association,
     prompt_response_association_paired,
 )

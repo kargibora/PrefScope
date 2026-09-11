@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from prefscope.artifacts import BATTLES, Z_DIFF, Z_PROMPT
-from prefscope.pipeline.prompt_delta import run_prompt_conditioned_delta
+from prefscope.recipes.pipeline.prompt_delta import run_prompt_conditioned_delta
 
 
 def _corpus(path, ids, rng):

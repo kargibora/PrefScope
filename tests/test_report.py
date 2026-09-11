@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from prefscope.artifacts import BATTLES, Z_PROMPT
-from prefscope.pipeline.report import (
+from prefscope.recipes.pipeline.report import (
     format_report,
     prompt_concept_winrates,
     prompt_to_response_winrates,
@@ -50,7 +50,7 @@ def test_prompt_concept_winrates_drops_silent_rows(tmp_path):
     assigned to feature 0 by a bare argmax (#4)."""
     import numpy as np
     import pandas as pd
-    from prefscope.pipeline.report import prompt_concept_winrates
+    from prefscope.recipes.pipeline.report import prompt_concept_winrates
 
     plens = tmp_path / "plens"
     plens.mkdir()
@@ -259,39 +259,3 @@ def test_prompt_reports_keep_overlapping_concepts_instead_of_argmax(tmp_path):
     edges = prompt_to_response_winrates(
         plens, ids, response, [7], win, min_support=2)
     assert set(edges["prompt_concept"]) == {0, 1}
-
-
-# --- CLI handler wiring (embedder/projector monkeypatched; no GPU) ---
-import json
-
-from prefscope import __main__ as cli
-
-
-def test_cmd_report_writes_markdown_and_features_csv(tmp_path, monkeypatch):
-    (tmp_path / "manifest.json").write_text(json.dumps({"input_rep": "difference"}))
-    ann = {"per_sample": [
-        {"instruction_id": "0", "model_a": "M", "model_b": "Y", "instruction": "p0",
-         "completion_a": "a0", "completion_b": "b0", "judge_pref": 1.0},
-        {"instruction_id": "1", "model_a": "Y", "model_b": "M", "instruction": "p1",
-         "completion_a": "a1", "completion_b": "b1", "judge_pref": 0.0},
-    ]}
-    apath = tmp_path / "ann.json"
-    apath.write_text(json.dumps(ann))
-
-    def fake_run_diagnose(battles, model, embedder, projector, **kw):
-        df = pd.DataFrame({"feature_id": [0, 1], "concept": ["chatty", "refuses"],
-                           "fire_rate": [0.8, 0.2], "net_direction": [0.3, -0.4],
-                           "helps_win": [0.1, 0.2]})
-        return df, {"model": model, "n_battles": 2, "win_rate": 1.0, "n_features": 2}
-
-    monkeypatch.setattr("prefscope.pipeline.diagnose.run_diagnose", fake_run_diagnose)
-    monkeypatch.setattr("prefscope.cli.analysis.Embedder", lambda *a, **k: object())
-    monkeypatch.setattr("prefscope.encode.sae.SAEProjector", lambda *a, **k: object())
-
-    out_md = tmp_path / "report.md"
-    rc = cli.main(["report", "--lens-dir", str(tmp_path), "--annotations", str(apath),
-                   "--model", "M", "--out", str(out_md), "--device", "cpu"])
-    assert rc == 0
-    assert out_md.exists()
-    assert "# M — concept report card" in out_md.read_text()
-    assert (tmp_path / "report_features.csv").exists()

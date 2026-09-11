@@ -100,11 +100,14 @@ def select_feature_batch(
                 f"lens backend array {name!r} orientation must be {expected!r}, got "
                 f"{batch.orientations[name]!r}"
             )
+    selected_ids = (
+        batch.feature_ids if feature_ids is None else validate_feature_ids(feature_ids)
+    )
+    if selected_ids == batch.feature_ids and names == tuple(batch.arrays):
+        return batch
     if feature_ids is None:
-        selected_ids = batch.feature_ids
         positions = tuple(range(len(selected_ids)))
     else:
-        selected_ids = validate_feature_ids(feature_ids)
         lookup = {
             feature_id: index for index, feature_id in enumerate(batch.feature_ids)
         }
@@ -115,6 +118,12 @@ def select_feature_batch(
             )
         positions = tuple(lookup[value] for value in selected_ids)
     arrays = {name: batch.array(name)[:, positions] for name in names}
+    provenance = dict(batch.provenance)
+    if "views" in provenance:
+        descriptors = provenance["views"]
+        provenance["views"] = {
+            name: descriptors[name] for name in names if name in descriptors
+        }
     return FeatureBatch(
         row_ids=batch.row_ids,
         arrays=arrays,
@@ -124,7 +133,7 @@ def select_feature_batch(
         metadata=batch.metadata,
         activation_polarity=batch.activation_polarity,
         code_semantics=batch.code_semantics,
-        provenance=batch.provenance,
+        provenance=provenance,
     )
 
 
@@ -163,6 +172,36 @@ class RepresentationLensBackend(LensBackend):
     def code_semantics(self) -> str:
         return self.lens.code_semantics
 
+    @property
+    def feature_space_identity(self) -> dict[str, str | None]:
+        from pathlib import Path
+
+        from prefscope.api._feature_space import (
+            native_lens_feature_space_identity,
+            projector_feature_space_identity,
+        )
+        from prefscope.artifacts import SAE_MODEL
+
+        loaded_identity = getattr(
+            self.lens, "_loaded_native_feature_space_identity", None
+        )
+        if loaded_identity is not None:
+            return dict(loaded_identity)
+        lens_dir = getattr(self.lens, "lens_dir", None)
+        if lens_dir is not None and (Path(lens_dir) / SAE_MODEL).is_file():
+            return native_lens_feature_space_identity(
+                Path(lens_dir) / SAE_MODEL,
+                m_total=self.m_total,
+                input_dim=getattr(self.lens.projector, "input_dim", None),
+                input_rep=self.input_rep,
+                whiten_path=Path(lens_dir) / "whiten.npz",
+            )
+        return projector_feature_space_identity(
+            self.lens.projector,
+            input_rep=self.input_rep,
+            backend=type(self.lens.projector).__name__,
+        )
+
     def featurize(
         self,
         items,
@@ -171,7 +210,12 @@ class RepresentationLensBackend(LensBackend):
         feature_ids=None,
         batch_size=None,
     ) -> FeatureBatch:
-        del batch_size  # batching is owned by the configured RepresentationSource
+        if batch_size is not None:
+            raise ValueError(
+                "native representation lenses do not support per-call batch_size; "
+                "set embed_batch_size when loading a native lens, or configure "
+                "batching on your RepresentationSource"
+            )
         if self.lens.representation_source is None:
             raise ValueError(
                 "this lens has no item source; inject a RepresentationSource or use "
@@ -184,7 +228,9 @@ class RepresentationLensBackend(LensBackend):
             raise ValueError(
                 "representation source row_ids must exactly match input item order"
             )
-        batch = self.lens.project_representations(representations)
+        from prefscope.api._lens_projection import project_representations
+
+        batch = project_representations(self.lens, representations)
         return select_feature_batch(
             batch,
             views=tuple(views),

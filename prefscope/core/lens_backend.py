@@ -141,6 +141,11 @@ class LensBackend(ABC):
     def code_semantics(self) -> str:
         return "custom"
 
+    @property
+    def feature_space_identity(self) -> dict[str, str | None]:
+        """Declare a stable coordinate identity, or remain explicitly unbound."""
+        return {"feature_space_id": None, "feature_space_status": "unbound"}
+
     @abstractmethod
     def featurize(
         self,
@@ -150,7 +155,11 @@ class LensBackend(ABC):
         feature_ids: tuple[int, ...] | None = None,
         batch_size: int | None = None,
     ) -> FeatureBatch:
-        """Encode aligned items into the requested role-aware feature views."""
+        """Encode aligned items into the requested role-aware feature views.
+
+        Honor an explicit ``batch_size`` or raise ``ValueError`` if unsupported.
+        ``None`` uses the backend's configured batching.
+        """
 
 
 __all__ = [

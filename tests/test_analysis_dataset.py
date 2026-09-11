@@ -2,7 +2,7 @@
 import numpy as np
 import pandas as pd
 
-from prefscope.analysis.dataset import dataset_reward, split_half_stable
+from prefscope.recipes.analysis.dataset import dataset_reward, split_half_stable
 
 
 def test_dataset_reward_is_mean_sign():
@@ -44,8 +44,7 @@ def test_split_half_stable_flags_sign_flip():
     assert bool(out.set_index("feature_id")["stable"][0]) is False
 
 
-import pytest
-from prefscope.analysis.dataset import spurious_share, label_inconsistency
+from prefscope.recipes.analysis.dataset import spurious_share, label_inconsistency
 
 
 def test_spurious_share():
@@ -73,7 +72,7 @@ def test_label_inconsistency_sign():
     assert label_inconsistency(z_ok, reward, undesirable=[0])[0] == 2.0
 
 
-from prefscope.analysis.dataset import symmetric_activity
+from prefscope.recipes.analysis.dataset import symmetric_activity
 
 
 def test_symmetric_activity():
@@ -84,7 +83,7 @@ def test_symmetric_activity():
     assert (s >= 0).all()
 
 
-from prefscope.analysis import region_behavior_contrast
+from prefscope.recipes.analysis.dataset import region_behavior_contrast
 
 
 def test_region_behavior_contrast_finds_region_signal():
@@ -110,8 +109,8 @@ def test_region_behavior_contrast_finds_region_signal():
         assert not (bool(r["stable"]) and r["p_bonferroni"] < 0.05)
 
 
-from prefscope.analysis import auto_undesirable, feature_confound_correlation
-from prefscope.analysis import diagnose_dataset   # re-exported from the package
+from prefscope.recipes.analysis.dataset import auto_undesirable, feature_confound_correlation
+from prefscope.recipes.analysis.dataset import diagnose_dataset
 
 
 def test_diagnose_dataset_composes():

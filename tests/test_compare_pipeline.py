@@ -4,9 +4,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from prefscope.__main__ import main
-from prefscope.pipeline.compare import compare_encoded_responses
-from prefscope.viewer_export.comparison import export_paired_comparison
+from prefscope.recipes.pipeline.compare import compare_encoded_responses
+from prefscope.recipes.viewer_export.comparison import export_paired_comparison
 
 
 def _write_bundle(tmp_path):
@@ -99,21 +98,6 @@ def test_compare_encoded_responses_writes_stable_artifacts(tmp_path):
     assert len(viewer["concepts"]) == 2
     assert len(viewer["contexts"]) == 4
     assert viewer["examples"][0]["side_b_name"] == "adapted"
-
-
-def test_compare_responses_cli_matches_pipeline_contract(tmp_path):
-    response, prompt, features, prompt_features = _write_bundle(tmp_path)
-    out = tmp_path / "cli_comparison"
-    code = main([
-        "compare-responses", "--encoded-dir", str(response),
-        "--features", str(features), "--prompt-encoded-dir", str(prompt),
-        "--prompt-features", str(prompt_features), "--side-a-name", "base",
-        "--side-b-name", "adapted", "--min-context-pairs", "10",
-        "--out", str(out),
-    ])
-    assert code == 0
-    assert (out / "concept_shift.parquet").exists()
-    assert pd.read_parquet(out / "concept_shift.parquet")["feature_id"].tolist() == [0, 1]
 
 
 def test_compare_without_prompt_bundle_has_typed_empty_context_artifact(tmp_path):

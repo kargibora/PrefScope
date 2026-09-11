@@ -51,7 +51,7 @@ def test_holdout_buckets_pos_neg_tie():
 def test_holdout_buckets_stratified_random_spans_non_extreme_rows():
     z = np.concatenate([np.arange(1, 51), -np.arange(1, 51), np.zeros(50)])
     out = holdout_buckets(z, np.arange(len(z)), n_per_bucket=10,
-                          rng=np.random.default_rng(0), sampling="stratified-random")
+                          rng=np.random.default_rng(0), sampling="random-active")
     assert len(out["pos"]) == len(out["neg"]) == len(out["tie"]) == 10
     # A uniform draw is not merely the ten largest magnitudes in either sign bucket.
     assert set(out["pos"]) != set(range(40, 50))

@@ -21,10 +21,9 @@ f(e_a) - f(e_b) != f(e_a - e_b)
 
 so these policies cannot be interchanged after training.
 
-`LensRep` is registry-backed internally, but it is a **closed artifact policy in
-the current schema**. The manifest validator, builders, CLI, viewer, and analysis
-contracts recognize only `difference`, `individual`, and `prompt`. Registering a
-new class in Python does not make it safely publishable or reloadable.
+`LensRep` is an internal, closed artifact policy. Native manifests and builders recognize
+only `difference`, `individual`, and `prompt`. Defining a new Python class does not make a
+new policy safely publishable or reloadable.
 
 Use a custom `RepresentationSource` when replacing Qwen embeddings with another
 fixed-width source. Adding a genuinely new lens representation requires a new

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from prefscope.pipeline.diagnose import diagnose_features, run_diagnose
+from prefscope.recipes.pipeline.diagnose import diagnose_features, run_diagnose
 
 
 def test_diagnose_features_basic_stats():

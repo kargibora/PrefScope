@@ -49,11 +49,11 @@ def _pairs():
 
 def test_embedding_source_and_difference_lens_are_source_agnostic():
     source = EmbeddingRepresentationSource(FakeEmbedder())
+    lens = Lens(FakeProjector(), representation_source=source)
+
+    features = lens.featurize(_pairs(), views=("response_difference",))
+
     representations = source.encode(_pairs())
-    lens = Lens(FakeProjector(), FakeEmbedder())
-
-    features = lens.project_representations(representations)
-
     assert set(representations.arrays) == {"prompt", "response_a", "response_b"}
     assert set(features.arrays) == {"z_diff"}
     np.testing.assert_allclose(
@@ -64,9 +64,8 @@ def test_embedding_source_and_difference_lens_are_source_agnostic():
     assert features.matrix("z_diff").role == "response_difference"
     assert features.provenance["representation_source"]["source_type"] == "text_embedding"
 
-
 def test_individual_lens_projects_single_custom_representations():
-    batch = RepresentationBatch(
+    representations = RepresentationBatch(
         row_ids=("a", "b"),
         arrays={"response_a": np.array([[1, 2, 3], [4, 5, 6]], np.float32)},
         provenance={"source_type": "residual", "layer": 12},
@@ -83,14 +82,15 @@ def test_individual_lens_projects_single_custom_representations():
         "code_semantics": "axis",
         "selection_rule": "batchtopk-absolute",
     }
-    lens = Lens(FakeProjector(), None, manifest=manifest)
+    source = PrecomputedRepresentationSource(representations)
+    lens = Lens(FakeProjector(), representation_source=source, manifest=manifest)
+    items = [PairItem("a", "p", "x"), PairItem("b", "q", "y")]
 
-    features = lens.project_representations(batch)
+    features = lens.featurize(items, views=("response_a",))
 
     assert set(features.arrays) == {"z_a"}
     assert features.matrix("z_a").role == "response_a"
-    assert features.provenance["representation_source"]["source_type"] == "residual"
-
+    assert features.provenance["representation_source"]["source_type"] == "precomputed"
 
 def test_callable_source_requires_the_public_batch_contract():
     source = CallableRepresentationSource(
@@ -126,7 +126,7 @@ def test_embedding_source_rejects_mixed_pairing():
         EmbeddingRepresentationSource(FakeEmbedder()).encode(rows)
 
 
-def test_lens_item_encoding_uses_injected_custom_source():
+def test_lens_featurize_uses_injected_custom_source():
     source = CallableRepresentationSource(
         lambda items: RepresentationBatch(
             row_ids=tuple(item.id for item in items),
@@ -145,14 +145,11 @@ def test_lens_item_encoding_uses_injected_custom_source():
         PairItem("b", "q", "c", "d", meta={"group_id": "h"}),
     ]
 
-    codes, metadata = lens.encode_pairs(items)
-    typed = lens.project_representations(source.encode(items))
+    features = lens.featurize(items, views=("response_difference",))
 
-    np.testing.assert_allclose(codes, [[2.0, 1.0], [2.0, 1.0]])
-    assert list(metadata.columns) == ["id", "pref", "model_a", "model_b"]
-    assert typed.metadata["group_id"] == ("g", "h")
-    assert typed.provenance["representation_source"]["source_type"] == "callable"
-
+    np.testing.assert_allclose(features.array("z_diff"), [[2.0, 1.0], [2.0, 1.0]])
+    assert features.metadata["group_id"] == ("g", "h")
+    assert features.provenance["representation_source"]["source_type"] == "callable"
 
 def test_pairs_to_battles_retains_custom_metadata_and_rejects_collisions():
     from prefscope.api.loaded_lens import pairs_to_battles
@@ -216,17 +213,21 @@ def test_in_memory_projector_declares_prompt_projection_semantics():
         activation_polarity = "nonnegative"
         code_semantics = "presence"
 
-    batch = RepresentationBatch(
+    representations = RepresentationBatch(
         row_ids=("a", "b"),
         arrays={"prompt": np.array([[1, 2, 3], [4, 5, 6]], np.float32)},
         provenance={"representation_family": "static_embedding"},
     )
-    features = Lens(PromptProjector()).project_representations(batch)
+    lens = Lens(
+        PromptProjector(),
+        representation_source=PrecomputedRepresentationSource(representations),
+    )
+    items = [PairItem("a", "p", "x"), PairItem("b", "q", "y")]
+    features = lens.featurize(items, views=("prompt",))
     assert set(features.arrays) == {"z_prompt"}
     assert features.matrix("z_prompt").role == "prompt"
     assert features.matrix("z_prompt").orientation == "none"
     assert features.activation_polarity == "nonnegative"
-
 
 def test_in_memory_projector_rejects_unknown_input_rep():
     class BadProjector(FakeProjector):
@@ -234,16 +235,6 @@ def test_in_memory_projector_rejects_unknown_input_rep():
 
     with pytest.raises(ValueError, match="input_rep"):
         Lens(BadProjector())
-
-
-def test_precomputed_source_is_registry_constructible():
-    from prefscope.core import registry
-
-    batch = RepresentationBatch(
-        row_ids=("a",), arrays={"response_a": np.ones((1, 2))})
-    source = registry.make(
-        "representation_source", "precomputed", batch=batch, source_name="cached")
-    assert isinstance(source, PrecomputedRepresentationSource)
 
 
 def test_portable_provenance_is_deeply_immutable_and_json_serializable():
@@ -309,8 +300,7 @@ def _embedding_manifest(model_id):
 
 
 def test_lens_rejects_same_width_vectors_from_another_coordinate_system():
-    lens = Lens(FakeProjector(), manifest=_embedding_manifest("expected/model"))
-    batch = RepresentationBatch(
+    representations = RepresentationBatch(
         row_ids=("a",),
         arrays={"response_a": np.ones((1, 3))},
         provenance={
@@ -320,18 +310,16 @@ def test_lens_rejects_same_width_vectors_from_another_coordinate_system():
             }
         },
     )
+    lens = Lens(
+        FakeProjector(),
+        representation_source=PrecomputedRepresentationSource(representations),
+        manifest=_embedding_manifest("expected/model"),
+    )
     with pytest.raises(ValueError, match="incompatible.*embed_model_id"):
-        lens.project_representations(batch)
-    projected = lens.project_representations(
-        batch, allow_representation_mismatch=True)
-    compatibility = projected.provenance["lens"]["representation_compatibility"]
-    assert compatibility["status"] == "unsafe_override"
-    assert compatibility["unsafe_override"] is True
-
+        lens.featurize([PairItem("a", "p", "x")], views=("response_a",))
 
 def test_lens_records_matching_representation_fingerprints():
-    lens = Lens(FakeProjector(), manifest=_embedding_manifest("expected/model"))
-    batch = RepresentationBatch(
+    representations = RepresentationBatch(
         row_ids=("a",),
         arrays={"response_a": np.ones((1, 3))},
         provenance={
@@ -341,11 +329,15 @@ def test_lens_records_matching_representation_fingerprints():
             }
         },
     )
-    projected = lens.project_representations(batch)
+    lens = Lens(
+        FakeProjector(),
+        representation_source=PrecomputedRepresentationSource(representations),
+        manifest=_embedding_manifest("expected/model"),
+    )
+    projected = lens.featurize([PairItem("a", "p", "x")], views=("response_a",))
     compatibility = projected.provenance["lens"]["representation_compatibility"]
     assert compatibility["status"] == "matched"
     assert compatibility["expected_fingerprint"] == compatibility["observed_fingerprint"]
-
 
 def test_representation_and_feature_arrays_are_detached_float32_read_only():
     source = np.array([[1.0, 2.0]], dtype=np.float64)

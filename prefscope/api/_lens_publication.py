@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import errno
+import hashlib
 import json
+from numbers import Integral
 import os
 from pathlib import Path
 import shutil
@@ -10,113 +13,172 @@ import socket
 import stat
 import uuid
 
-from prefscope.api._lens_annotations import _annotation_paths
-from prefscope.artifacts import MANIFEST, SAE_MODEL
-
-def _pid_is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+from prefscope.api._lens_annotations import _annotation_paths, _read_annotation_csv
+from prefscope.artifacts import (
+    FEATURE_CATALOG,
+    FEATURE_NAMES,
+    MANIFEST,
+    PROMPT_FEATURE_NAMES,
+    SAE_MODEL,
+)
 
 
-def _lock_owner(path: Path) -> tuple[dict | None, str]:
+def _locking_module():
+    if os.name == "nt":
+        import msvcrt
+
+        return msvcrt
     try:
-        before = path.lstat()
-        raw = path.read_text()
-        after = path.lstat()
-    except FileNotFoundError:
-        return None, "lock disappeared"
-    if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != (
-        after.st_dev, after.st_ino
-    ):
-        return None, "lock is not a stable regular file"
+        import fcntl
+    except ImportError as exc:
+        raise RuntimeError(
+            "transactional lens publication locking is unavailable on this platform"
+        ) from exc
+    return fcntl
+
+
+def _validate_lock_parent(parent: Path) -> None:
+    if parent.is_symlink() or not parent.is_dir():
+        raise RuntimeError(f"publication lock parent must be a real directory: {parent}")
+    opened = parent.stat(follow_symlinks=False)
+    mode = stat.S_IMODE(opened.st_mode)
+    sticky = bool(opened.st_mode & stat.S_ISVTX)
+    if hasattr(os, "geteuid"):
+        owner_matches = opened.st_uid == os.geteuid()
+        if not owner_matches and not sticky:
+            raise RuntimeError(
+                f"publication lock parent is not owned by this user: {parent}"
+            )
+        if mode & 0o022 and not sticky:
+            raise RuntimeError(
+                f"publication lock parent is writable by other users: {parent}"
+            )
+
+
+def _secure_lock_descriptor(lock_path: Path) -> int:
+    _validate_lock_parent(lock_path.parent)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    if os.name != "nt" and (not nofollow or not cloexec):
+        raise RuntimeError("secure publication locking requires O_NOFOLLOW and O_CLOEXEC")
+    if lock_path.is_symlink():
+        raise RuntimeError(
+            f"cannot securely open publication lock {lock_path}: path is a symlink"
+        )
+    flags = (
+        os.O_RDWR
+        | os.O_CREAT
+        | os.O_APPEND
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
+        | nofollow
+        | cloexec
+    )
+    descriptor = os.open(lock_path, flags, 0o600)
     try:
-        owner = json.loads(raw)
-        pid = int(owner["pid"])
-        hostname = str(owner["hostname"])
-        owner_id = str(owner["owner_id"])
-        uuid.UUID(hex=owner_id)
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
-        return None, "lock metadata is invalid"
-    if pid <= 0 or hostname != socket.gethostname():
-        return None, "lock owner cannot be safely checked on this host"
-    return {"pid": pid, "hostname": hostname, "owner_id": owner_id}, raw
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(
+                f"publication lock must be a regular file: {lock_path}")
+        if opened.st_nlink != 1:
+            raise RuntimeError(
+                f"publication lock must have exactly one hard link: {lock_path}"
+            )
+        if hasattr(os, "geteuid") and opened.st_uid != os.geteuid():
+            raise RuntimeError(
+                f"publication lock must be owned by this user: {lock_path}"
+            )
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+            if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o600:
+                raise RuntimeError(
+                    f"publication lock permissions must be 0600: {lock_path}")
+        entry = lock_path.stat(follow_symlinks=False)
+        if (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError(
+                f"publication lock changed while opening: {lock_path}")
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _write_lock_metadata(descriptor: int, owner_id: str) -> None:
+    payload = json.dumps(
+        {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "owner_id": owner_id,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    os.ftruncate(descriptor, 0)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError("short write while updating publication lock metadata")
+        offset += written
+    os.fsync(descriptor)
 
 
 @contextmanager
 def _publication_lock(destination: Path):
+    """Hold a stable, never-unlinked advisory lock for one destination."""
+    locker = _locking_module()
     lock_path = destination.parent / f".{destination.name}.lock"
-    owner_id = uuid.uuid4().hex
-    payload = json.dumps({
-        "pid": os.getpid(),
-        "hostname": socket.gethostname(),
-        "owner_id": owner_id,
-    }, sort_keys=True)
-    for _ in range(3):
-        try:
-            descriptor = os.open(
-                lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            owner, detail = _lock_owner(lock_path)
-            if owner is None:
-                if detail == "lock disappeared":
-                    continue
-                raise RuntimeError(
-                    f"cannot publish {destination}: publication lock {lock_path} "
-                    f"is present but {detail}; refusing to remove it")
-            if _pid_is_alive(owner["pid"]):
-                raise RuntimeError(
-                    f"cannot publish {destination}: another active publisher "
-                    f"holds {lock_path} (pid {owner['pid']})")
-            current, current_raw = _lock_owner(lock_path)
-            if current != owner or current_raw != detail:
-                continue
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
-            continue
-        else:
-            lock_stat = os.fstat(descriptor)
-            try:
-                encoded = payload.encode("utf-8")
-                offset = 0
-                while offset < len(encoded):
-                    written = os.write(descriptor, encoded[offset:])
-                    if written <= 0:
-                        raise OSError("short write while creating publication lock")
-                    offset += written
-                os.fsync(descriptor)
-            except BaseException:
-                os.close(descriptor)
-                try:
-                    current_stat = lock_path.stat(follow_symlinks=False)
-                    if (
-                        current_stat.st_dev == lock_stat.st_dev
-                        and current_stat.st_ino == lock_stat.st_ino
-                    ):
-                        lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                raise
-            else:
-                os.close(descriptor)
-            break
-    else:
-        raise RuntimeError(f"could not acquire publication lock for {destination}")
     try:
+        descriptor = _secure_lock_descriptor(lock_path)
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot securely open publication lock {lock_path}") from exc
+
+    acquired = False
+    try:
+        try:
+            if os.name == "nt":
+                if os.fstat(descriptor).st_size == 0:
+                    os.write(descriptor, b"\0")
+                    os.fsync(descriptor)
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                locker.locking(descriptor, locker.LK_NBLCK, 1)
+            else:
+                locker.flock(descriptor, locker.LOCK_EX | locker.LOCK_NB)
+            acquired = True
+        except OSError as exc:
+            if os.name != "nt" and exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+            raise RuntimeError(
+                f"cannot publish {destination}: another active publisher holds "
+                f"{lock_path}"
+            ) from exc
+
+        # Metadata helps operators identify the last/acquiring process, but it
+        # never decides ownership. Only the kernel advisory lock does that.
+        owner_id = uuid.uuid4().hex
+        _write_lock_metadata(descriptor, owner_id)
+        opened = os.fstat(descriptor)
+        entry = lock_path.stat(follow_symlinks=False)
+        if opened.st_nlink != 1:
+            raise RuntimeError(
+                f"publication lock acquired an unsafe hard link: {lock_path}"
+            )
+        if (entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError(
+                f"publication lock directory entry changed: {lock_path}")
         yield
     finally:
         try:
-            owner, _ = _lock_owner(lock_path)
-            if owner is not None and owner["owner_id"] == owner_id:
-                lock_path.unlink()
-        except FileNotFoundError:
-            pass
+            if acquired:
+                if os.name == "nt":
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    locker.locking(descriptor, locker.LK_UNLCK, 1)
+                else:
+                    locker.flock(descriptor, locker.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _recover_orphan_backup(destination: Path) -> None:
@@ -134,6 +196,122 @@ def _recover_orphan_backup(destination: Path) -> None:
         raise RuntimeError(
             f"cannot recover {destination}: orphan backup {backup} is not a directory")
     os.replace(backup, destination)
+
+
+def _materialize_feature_names(staging: Path, lens) -> Path:
+    """Publish one complete names table while leaving unnamed axes explicitly blank."""
+    import pandas as pd
+
+    filename = (
+        PROMPT_FEATURE_NAMES if lens.input_rep == "prompt" else FEATURE_NAMES
+    )
+    path = staging / filename
+    backend = getattr(lens, "backend", None)
+    projector = getattr(lens, "projector", None)
+    width_value = getattr(backend, "m_total", None)
+    if width_value is None:
+        width_value = getattr(projector, "m_total", None)
+    frame = _read_annotation_csv(path) if path.is_file() else None
+    if width_value is None and frame is not None and "feature_id" in frame:
+        width_value = 0 if frame.empty else int(frame["feature_id"].max()) + 1
+    if width_value is None and (staging / MANIFEST).is_file():
+        manifest = json.loads((staging / MANIFEST).read_text())
+        width_value = manifest.get("m_total")
+    if width_value is None:
+        raise ValueError("lens publication needs a declared feature width")
+    width = int(width_value)
+    if frame is not None:
+        if "feature_id" not in frame.columns or not frame.columns.is_unique:
+            raise ValueError(f"{filename} needs unique columns including feature_id")
+        raw_ids = frame["feature_id"]
+        if (
+            raw_ids.isna().any()
+            or raw_ids.duplicated().any()
+            or any(
+                isinstance(value, bool) or not isinstance(value, Integral)
+                for value in raw_ids
+            )
+        ):
+            raise ValueError(
+                f"{filename} feature_id values must be unique non-boolean integers"
+            )
+        invalid = [int(value) for value in raw_ids if value < 0 or value >= width]
+        if invalid:
+            raise ValueError(
+                f"{filename} contains feature IDs outside [0, {width}): {invalid[:10]}"
+            )
+        if "concept" not in frame:
+            if "name" not in frame:
+                raise ValueError(f"{filename} needs a concept column")
+            frame = frame.rename(columns={"name": "concept"})
+        frame = (
+            pd.DataFrame({"feature_id": range(width)})
+            .merge(frame, on="feature_id", how="left", validate="one_to_one")
+        )
+    else:
+        frame = pd.DataFrame(
+            {"feature_id": range(width), "concept": [None] * width}
+        )
+    frame.to_csv(path, index=False, lineterminator="\n")
+    return path
+
+
+def _materialize_feature_catalog(staging: Path, lens, names_path: Path) -> Path:
+    """Bundle the complete proposed-name catalog with explicit coordinate identity."""
+    from prefscope.api.feature_catalog import FeatureCatalog
+    from prefscope.api.feature_catalog_io import encode_feature_catalog
+
+    names = _read_annotation_csv(names_path)
+    table = names[["feature_id", "concept"]].rename(columns={"concept": "name"})
+    try:
+        identity = lens.feature_space_identity
+    except (AttributeError, TypeError, ValueError):
+        identity = {
+            "feature_space_id": None,
+            "feature_space_status": "unbound",
+        }
+    if getattr(lens, "_loaded_native_feature_space_identity", None) is not None:
+        from prefscope.api._feature_space import native_lens_feature_space_identity
+
+        staged_identity = native_lens_feature_space_identity(
+            staging / SAE_MODEL,
+            m_total=lens.projector.m_total,
+            input_dim=lens.projector.input_dim,
+            input_rep=lens.input_rep,
+            whiten_path=staging / "whiten.npz",
+        )
+        if staged_identity != identity:
+            raise ValueError(
+                "native lens backing weights or whitener changed since loading; "
+                "reload the lens before saving"
+            )
+    names_digest = hashlib.sha256(names_path.read_bytes()).hexdigest()
+    source = {
+        "kind": "native_lens_names",
+        "evidence_layer": "proposed_label",
+        "artifact": names_path.name,
+        "content_sha256": names_digest,
+        **identity,
+    }
+    catalog = FeatureCatalog(
+        table,
+        provenance={
+            "schema_version": 1,
+            "source_kind": "native_lens_bundle",
+            "input_rep": str(lens.input_rep),
+            "n_features": len(table),
+            "feature_width": len(table),
+            "names_artifact": names_path.name,
+            "names_sha256": names_digest,
+            **identity,
+        },
+        column_sources={"name": source},
+    )
+    path = staging / FEATURE_CATALOG
+    path.write_bytes(
+encode_feature_catalog(catalog)
+    )
+    return path
 
 
 def save_lens(
@@ -231,6 +409,8 @@ def save_lens(
                     # canonical file with the same name inside the staged artifact.
                     if inference_only or path.parent != src.resolve():
                         shutil.copy2(path, staging / path.name)
+            names_path = _materialize_feature_names(staging, lens)
+            _materialize_feature_catalog(staging, lens, names_path)
             if dest.exists():
                 os.replace(dest, backup)
             try:

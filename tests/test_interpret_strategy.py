@@ -1,9 +1,12 @@
 """Phase 1: interpreter strategies are real, registry-resolved components."""
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from prefscope.core import registry
+import prefscope.interpret.strategy as strategy_module
 from prefscope.interpret.strategy import (
     IndividualNameStrategy, IndividualVerifyStrategy, LensCodes, NameStrategy,
     PairwiseNameStrategy, PromptVerifyStrategy, SingleTextNameStrategy, VerifyCodes,
@@ -92,6 +95,89 @@ def test_signed_prompt_negative_pole_names_negative_examples():
     assert "negative 5" in naming_prompt and "positive 0" not in naming_prompt
     assert result.loc[0, "pole"] == "negative"
     assert result.loc[0, "fire_rate"] == 5 / 60
+
+
+@pytest.mark.parametrize("loader", [LensCodes, VerifyCodes])
+def test_prompt_lens_joins_explicit_ids_and_splits_by_group(tmp_path, monkeypatch, loader):
+    lens_dir = tmp_path / "lens"
+    lens_dir.mkdir()
+    pd.DataFrame(
+        {
+            "instruction_id": ["de:source-1", "fr:source-1"],
+            "group_id": ["source-1", "source-1"],
+        }
+    ).to_parquet(lens_dir / "battles.parquet", index=False)
+    np.save(lens_dir / "z_prompt.npy", np.ones((2, 1), dtype=np.float32))
+    corpus = tmp_path / "corpus.parquet"
+    pd.DataFrame(
+        {
+            "instruction_id": ["fr:source-1", "de:source-1"],
+            "group_id": ["corpus-group", "corpus-group"],
+            "prompt": ["question", "frage"],
+            "completion_a": ["réponse", "antwort"],
+        }
+    ).to_parquet(corpus, index=False)
+    monkeypatch.setattr(
+        strategy_module,
+        "_manifest",
+        lambda _: SimpleNamespace(
+            input_rep="prompt",
+            activation_polarity="nonnegative",
+            code_semantics="positive_nonzero_presence",
+        ),
+    )
+
+    codes = loader.load(lens_dir, corpus=corpus, lens_kind="prompt")
+
+    assert codes.prompts == ["frage", "question"]
+    assert codes.instruction_ids == ["source-1", "source-1"]
+
+    pd.DataFrame(
+        {
+            "instruction_id": ["de:source-1"],
+            "group_id": ["source-1"],
+            "prompt": ["frage"],
+            "completion_a": ["antwort"],
+        }
+    ).to_parquet(corpus, index=False)
+    with pytest.raises(ValueError, match="missing 1 lens row identities"):
+        loader.load(lens_dir, corpus=corpus, lens_kind="prompt")
+
+
+@pytest.mark.parametrize("loader", [LensCodes, VerifyCodes])
+@pytest.mark.parametrize("id_column", ["battle_id", "instruction_id"])
+def test_prompt_lens_without_groups_uses_aligned_corpus_groups(
+    tmp_path, monkeypatch, loader, id_column
+):
+    lens_dir = tmp_path / "lens"
+    lens_dir.mkdir()
+    pd.DataFrame({id_column: ["a", "b", "c"]}).to_parquet(
+        lens_dir / "battles.parquet", index=False
+    )
+    np.save(lens_dir / "z_prompt.npy", np.ones((3, 1), dtype=np.float32))
+    corpus = tmp_path / "corpus.parquet"
+    pd.DataFrame(
+        {
+            id_column: ["b", "c", "a"],
+            "prompt": ["different prompt", "repeated prompt", "repeated prompt"],
+            "completion_a": ["one", "two", "three"],
+        }
+    ).to_parquet(corpus, index=False)
+    monkeypatch.setattr(
+        strategy_module,
+        "_manifest",
+        lambda _: SimpleNamespace(
+            input_rep="prompt",
+            activation_polarity="nonnegative",
+            code_semantics="positive_nonzero_presence",
+        ),
+    )
+
+    codes = loader.load(lens_dir, corpus=corpus, lens_kind="prompt")
+
+    assert codes.prompts == ["repeated prompt", "different prompt", "repeated prompt"]
+    assert codes.instruction_ids[0] == codes.instruction_ids[2]
+    assert codes.instruction_ids[0] != codes.instruction_ids[1]
 
 
 def test_individual_strategy_requires_z_a():

@@ -119,7 +119,7 @@ def test_load_lens_battles_handles_every_shape(tmp_path, shape):
 
 
 def test_export_examples_handles_every_shape(tmp_path, shape):
-    from prefscope.viewer_export.examples import export_examples
+    from prefscope.recipes.viewer_export.examples import export_examples
 
     lens = make_lens(tmp_path, shape)
     corpus = make_corpus(tmp_path, shape)
@@ -128,22 +128,6 @@ def test_export_examples_handles_every_shape(tmp_path, shape):
     out = _assert_deliberate(export_examples, lens, str(corpus), features, 3)
     if out is not None:
         assert set(out) <= {str(i) for i in range(M)}
-
-
-def test_viewer_export_cli_handles_every_shape(tmp_path, shape):
-    from prefscope.viewer_export.cli import main as export_main
-
-    lens = make_lens(tmp_path, shape)
-    corpus = make_corpus(tmp_path, shape)
-    out = tmp_path / f"bundle_{shape}"
-    code = _assert_deliberate(export_main, [
-        "--lens-dir", str(lens), "--corpus", str(corpus), "--out", str(out)])
-    if code is None:
-        return
-    assert code == 0
-    manifest = json.loads((out / "bundle_manifest.json").read_text())
-    assert manifest["schema_version"] == 2
-    assert "features.json" in manifest["files"] and "meta.json" in manifest["files"]
 
 
 def test_classify_role_evidence_handles_every_shape(tmp_path, shape):
@@ -159,7 +143,7 @@ def test_classify_role_evidence_handles_every_shape(tmp_path, shape):
 
 
 def test_presence_and_prompt_regions_handle_every_shape(tmp_path, shape):
-    from prefscope.analysis.presence import concept_presence
+    from prefscope.recipes.analysis.presence import concept_presence
 
     lens = make_lens(tmp_path, shape)
     z = np.load(lens / "z_a.npy")
@@ -191,22 +175,9 @@ def test_paired_only_exports_refuse_single_response_clearly(tmp_path, shape):
         assert require_paired_codes(lens, command="test").exists()
 
 
-def test_win_relevance_refuses_single_response(tmp_path, shape):
-    from prefscope.cli import main
-
-    lens = make_lens(tmp_path, shape)
-    corpus = make_corpus(tmp_path, shape)
-    if shape != "paired_labeled":
-        return
-    code = _assert_deliberate(main, [
-        "win-relevance", "--lens-dir", str(lens), "--corpus", str(corpus),
-        "--out", str(tmp_path / "win.csv")])
-    assert code in (0, 2, None)
-
-
 def test_fire_rate_is_available_for_every_shape(tmp_path, shape):
     """generality drives sorting and display; it must not be empty for single data."""
-    from prefscope.viewer_export.features import feature_fire_rate
+    from prefscope.recipes.viewer_export.features import feature_fire_rate
 
     lens = make_lens(tmp_path, shape)
     rates = feature_fire_rate(lens)

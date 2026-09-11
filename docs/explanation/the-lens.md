@@ -53,7 +53,7 @@ $$
 For a direct difference lens, orientation must be applied **before** projection. The
 diagnosis bank therefore projects both A-minus-B and B-minus-A instead of negating one
 result. For an individual lens, PrefScope projects A and B once and forms both exact code
-differences from `z_a` and `z_b`. See [Diagnosis math](diagnosis-math.md#3-the-oriented-code-bank-pool-baseline).
+differences from `z_a` and `z_b`. Specialized oriented-bank logic is retained as recipe code.
 
 ## The default instantiation
 
@@ -110,4 +110,4 @@ with `--m-total` / `--k` (see the [CLI reference](../reference/cli.md)).
   `--matryoshka-prefix`).
 
 To add a different encoder, register an `sae` component and declare its polarity and
-code semantics. See [add an SAE](../extending/add-an-sae.md).
+code semantics. See [add a lens backend](../extending/add-a-lens-backend.md).

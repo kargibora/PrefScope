@@ -21,10 +21,10 @@ def test_top_level_help_exits_zero():
 
 
 @pytest.mark.parametrize("cmd", [
-    "inspect", "build-lens", "build-prompt-lens", "diagnose",
-    "win-relevance", "associate-outcomes", "prepare-dataset", "encode-dataset", "concepts",
-    "compare-responses", "cluster-features", "feature-relations", "screen-confounds",
-    "init-demo", "package-lens", "extract-concepts",
+    "inspect", "init-demo", "build-corpus", "prepare-dataset", "build-lens",
+    "embed-corpus", "embed-prompts", "build-prompt-lens", "package-lens",
+    "encode-dataset", "interpret",
+    "extract-activations", "train-token-sae", "summarize-activations",
 ])
 def test_subcommand_help_exits_zero(cmd):
     # exercises full sub-parser construction for the heavy commands too

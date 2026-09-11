@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from prefscope.analysis.feature_graph import (
+from prefscope.recipes.analysis.feature_graph import (
     feature_relationship_summary,
     feature_relationships,
 )

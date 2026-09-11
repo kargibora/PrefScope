@@ -60,3 +60,9 @@ docs/design/
 # Local development configuration
 /CLAUDE.md
 /.claude/
+
+# Cluster deployment recipes: scheduler-specific, not part of the reusable library.
+/scripts/slurm/
+
+# Generated outputs from the self-contained example gallery
+/example-output/

@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from prefscope.viewer_export import export_feature_map
+from prefscope.recipes.viewer_export.maps import export_feature_map
 
 
 def _lens(tmp_path, directions: np.ndarray):
