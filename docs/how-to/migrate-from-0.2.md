@@ -54,10 +54,14 @@ summary = activation_summary(z_a)
 examples = top_activating_rows(z_a, k=5)
 ```
 
-Preference statistics, outcome associations, presence calibration, context analysis,
-clustering, and historical reporting code remain under `prefscope.recipes`. Import the
-specific recipe you need, or adapt it in your study. Recipes are not a stable API. See
+Preference statistics, outcome associations, context analysis, clustering, and historical
+reporting code remain under `prefscope.recipes`. Import the specific recipe you need,
+or adapt it in your study. Recipes are not a stable API. See
 [specialized analyses](../recipes/specialized-analysis.md).
+
+Presence calibration remains in `prefscope.interpret.calibrate`, and role classification
+remains in `prefscope.interpret.role`. These internal modules are not supported public
+APIs and may change.
 
 Do not treat an activity summary as a replacement for a statistical test. The caller
 chooses the outcome, comparison, membership rule, missing-data policy, grouping, and
@@ -118,7 +122,7 @@ The `run`, `analyze`, `report`, `diagnose`, `concepts`, `extract-concepts`,
 `win-relevance`, `associate-outcomes`, `compare-responses`, `context-profile`,
 `elicit`, `conditional-delta`, and related analysis commands have been removed.
 Interpretation role classification and presence-calibration CLI commands are also
-removed; retained specialized implementations are recipe code.
+removed. Their internal Python modules are listed above.
 
 `prefscope-view` and `prefscope-viewer` are removed. The remaining
 `prefscope-export-viewer` command takes saved feature data and an explicit Viewer build.

@@ -42,7 +42,9 @@ Choose optional capabilities with extras:
 | `arena` | Hugging Face dataset adapters |
 
 For example, `uv sync --extra cpu --extra arena` installs native lens support and dataset
-adapters. Repeat all extras you want to keep in later sync commands.
+adapters. The default inference examples use SAELens: use `uv sync --extra saelens`,
+adding `--extra arena` for the Hugging Face dataset example. Repeat all extras you want
+to keep in later sync commands.
 
 A plain `import prefscope` stays Torch-free.
 
