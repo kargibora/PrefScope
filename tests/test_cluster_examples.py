@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from prefscope.recipes.pipeline.cluster import cluster_examples, cluster_features
 
@@ -36,3 +37,9 @@ def test_cluster_features_still_groups_columns():
     out = cluster_features(z, n_clusters=2, method="spherical-kmeans")
     cid = out.set_index("feature_id")["cluster_id"]
     assert cid[0] == cid[1] and cid[2] == cid[3] and cid[0] != cid[2]
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, 1j, "1"])
+def test_cluster_examples_rejects_invalid_raw_values(bad):
+    with pytest.raises(ValueError, match="finite real"):
+        cluster_examples(np.array([[bad, 0], [0, 0]]))

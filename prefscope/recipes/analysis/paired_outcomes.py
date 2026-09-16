@@ -55,6 +55,7 @@ def paired_outcome_shift(
     exact McNemar/binomial test. Other bounded outcomes, and all grouped bounded
     outcomes, use finite-sample Hoeffding inference on independent B-minus-A units.
     Continuous outcomes remain descriptive because no outcome range is declared.
+    At least one outcome attribute is required.
     """
     if not isinstance(outcomes_a, NormalizedOutcomes) or not isinstance(
         outcomes_b, NormalizedOutcomes
@@ -66,12 +67,14 @@ def paired_outcome_shift(
         raise ValueError("paired outcome matrices must be exactly aligned")
     if outcomes_a.normalization != "none" or outcomes_b.normalization != "none":
         raise ValueError("paired outcome shifts require unnormalized outcome values")
+    if outcomes_a.n_attributes == 0:
+        raise ValueError("paired outcome shifts require at least one outcome")
     if not isinstance(min_units, int) or isinstance(min_units, bool) or min_units < 2:
         raise ValueError("min_units must be an integer >= 2")
     if not 0 < confidence < 1:
         raise ValueError("confidence must be in (0, 1)")
     if group_ids is not None:
-        validate_group_ids(group_ids, outcomes_a.n_rows)
+        group_ids = validate_group_ids(group_ids, outcomes_a.n_rows)
 
     rows = []
     for column, outcome_name in enumerate(outcomes_a.names):
@@ -178,7 +181,10 @@ def _strict_presence(values) -> np.ndarray:
         raise ValueError("prompt_presence must be a 2-D matrix")
     if raw.dtype == bool:
         return raw
-    if not np.issubdtype(raw.dtype, np.number):
+    if (
+        not np.issubdtype(raw.dtype, np.number)
+        or np.issubdtype(raw.dtype, np.complexfloating)
+    ):
         raise ValueError("prompt_presence must contain boolean or numeric 0/1 values")
     numeric = np.asarray(raw, dtype=float)
     if not np.isfinite(numeric).all() or not np.isin(numeric, [0.0, 1.0]).all():
@@ -226,6 +232,7 @@ def paired_outcome_shift_by_concept(
     This is a heterogeneity/interaction estimand: the mean paired outcome shift among
     concept-present independent units minus the mean shift among concept-absent units.
     It is not two unrelated stratum-specific association tests.
+    At least one outcome attribute and one prompt feature are required.
     """
     presence = _strict_presence(prompt_presence)
     if not isinstance(outcomes_a, NormalizedOutcomes) or not isinstance(
@@ -238,6 +245,10 @@ def paired_outcome_shift_by_concept(
         raise ValueError("paired outcome matrices must be exactly aligned")
     if outcomes_a.normalization != "none" or outcomes_b.normalization != "none":
         raise ValueError("paired outcome shifts require unnormalized outcome values")
+    if outcomes_a.n_attributes == 0:
+        raise ValueError("paired outcome shifts require at least one outcome")
+    if presence.shape[1] == 0:
+        raise ValueError("concept-conditioned shifts require at least one prompt feature")
     if presence.shape[0] != outcomes_a.n_rows:
         raise ValueError("prompt presence and outcomes must have exactly aligned rows")
     if not isinstance(min_units_per_arm, int) or isinstance(min_units_per_arm, bool):
@@ -257,7 +268,7 @@ def paired_outcome_shift_by_concept(
     if len(bases) != len(ids) or any(not value for value in bases):
         raise ValueError("basis must have one non-empty entry per presence column")
     if group_ids is not None:
-        validate_group_ids(group_ids, presence.shape[0])
+        group_ids = validate_group_ids(group_ids, presence.shape[0])
 
     rows = []
     for outcome_column, outcome_name in enumerate(outcomes_a.names):

@@ -19,7 +19,8 @@ def evaluate_preference(codes, meta, *, n_splits: int = 5, seed: int = 0,
                         names=None, group_col: str | None = None) -> dict:
     """Cross-validated preference prediction from codes.
 
-    Drops ties (pref == 0.5); label y = 1 if pref > 0.5 (A/self preferred) else 0.
+    Drops nonfinite preferences and ties (pref == 0.5). Finite preferences must
+    lie in [0, 1]; label y = 1 if pref > 0.5 (A/self preferred) else 0.
     Returns a dict: ``n`` (non-tie examples), ``accuracy``, ``auc``,
     ``baseline_accuracy`` (majority class), ``n_features``, and ``top_features``
     (a DataFrame of feature_id + coefficient, by |coefficient| descending).
@@ -34,6 +35,8 @@ def evaluate_preference(codes, meta, *, n_splits: int = 5, seed: int = 0,
     if "pref" not in meta.columns:
         raise ValueError("meta must have a 'pref' column (P(A preferred) per row)")
     pref = np.asarray(meta["pref"], dtype=float)
+    if np.any(np.isfinite(pref) & ((pref < 0.0) | (pref > 1.0))):
+        raise ValueError("finite preference probabilities must lie in [0, 1]")
     keep = np.isfinite(pref) & (pref != 0.5)
     X, y = codes[keep], (pref[keep] > 0.5).astype(int)
     if len(np.unique(y)) < 2:

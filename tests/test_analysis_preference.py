@@ -49,3 +49,11 @@ def test_evaluate_requires_pref():
     codes = np.zeros((10, 3), dtype=np.float32)
     with pytest.raises(ValueError, match="pref"):
         evaluate_preference(codes, pd.DataFrame({"x": range(10)}))
+
+
+@pytest.mark.parametrize("invalid_pref", [-0.1, 1.1])
+def test_evaluate_rejects_out_of_range_probabilities(invalid_pref):
+    codes, meta = _signal_dataset()
+    meta.loc[0, "pref"] = invalid_pref
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        evaluate_preference(codes, meta)

@@ -191,3 +191,40 @@ def test_conditioned_q_values_use_one_global_prompt_by_attribute_family():
     assert table["multiplicity_family"].nunique() == 1
     assert "all prompt-feature × outcome-attribute" in table.loc[
         0, "multiplicity_family"]
+
+
+def test_group_generators_match_reusable_group_ids():
+    a = normalize_outcomes([0.0] * 4, kind="probability", normalization="none")
+    b = normalize_outcomes([1.0, 0.0, 1.0, 0.0], kind="probability", normalization="none")
+    groups = ["a", "b", "c", "d"]
+    expected = paired_outcome_shift(a, b, group_ids=groups, min_units=2)
+    actual = paired_outcome_shift(a, b, group_ids=iter(groups), min_units=2)
+    assert actual.equals(expected)
+
+    presence = np.array([[1], [0], [1], [0]], dtype=bool)
+    expected = paired_outcome_shift_by_concept(
+        presence, a, b, group_ids=groups, min_units_per_arm=2)
+    actual = paired_outcome_shift_by_concept(
+        presence, a, b, group_ids=iter(groups), min_units_per_arm=2)
+    assert actual.equals(expected)
+
+
+def test_paired_concept_rejects_complex_presence():
+    a = normalize_outcomes([0.0] * 4, kind="probability", normalization="none")
+    b = normalize_outcomes([1.0, 0.0, 1.0, 0.0], kind="probability", normalization="none")
+    presence = np.array([[1 + 4j], [0 + 9j], [1 + 4j], [0 + 9j]])
+    with np.testing.assert_raises_regex(ValueError, "boolean or numeric 0/1"):
+        paired_outcome_shift_by_concept(presence, a, b, min_units_per_arm=2)
+
+
+def test_paired_recipes_reject_empty_feature_or_outcome_axes():
+    outcomes = normalize_outcomes([0.0] * 4, kind="probability", normalization="none")
+    with np.testing.assert_raises_regex(ValueError, "at least one prompt feature"):
+        paired_outcome_shift_by_concept(np.empty((4, 0)), outcomes, outcomes)
+
+    empty = normalize_outcomes(
+        np.empty((4, 0)), kind="multi_continuous", normalization="none")
+    with np.testing.assert_raises_regex(ValueError, "at least one outcome"):
+        paired_outcome_shift(empty, empty)
+    with np.testing.assert_raises_regex(ValueError, "at least one outcome"):
+        paired_outcome_shift_by_concept(np.ones((4, 1), dtype=bool), empty, empty)

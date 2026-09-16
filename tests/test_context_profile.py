@@ -1,5 +1,9 @@
+import json
+from math import comb
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from prefscope.recipes.analysis.context import (
     _context_membership,
@@ -149,3 +153,202 @@ def test_context_membership_rejects_nan_and_preserves_mixed_label_types():
     assert len(ids) == 4
     assert membership.shape == (4, 4)
     assert np.array_equal(membership.sum(axis=1), np.ones(4))
+
+
+def test_constant_activation_tails_do_not_fabricate_prompt_links():
+    scores = np.ones((10000, 1))
+    row = profile_prompt_linkage(scores, scores, scores).iloc[0]
+
+    assert row["prompt_scope"] == "no_detected_prompt_link"
+    assert row["n_top_prompts"] == len(scores)
+    assert row["n_linked_prompt_contexts"] == 0
+    context = json.loads(row["top_prompt_contexts_json"])[0]
+    for scale in context["scales"]:
+        assert scale["n_overlap"] == len(scores)
+        assert scale["top_share"] == scale["corpus_share"] == 1.0
+        assert scale["lift"] == scale["q_value"] == 1.0
+
+
+def test_partial_cutoff_ties_use_actual_sizes_and_are_row_order_invariant():
+    response = np.array([5, 4, 4, 4, 4, 0, 0, 0, 0, 0])[:, None]
+    prompt = np.array([4, 3, 3, 3, 0, 0, 0, 0, 0, 0])[:, None]
+    options = dict(top_n=2, min_top_examples=2, prompt_tail_fractions=(0.2, 0.3),
+                   min_tail_overlap=1, min_context_lift=1.0, min_stable_scales=2)
+    result = profile_prompt_linkage(response, np.zeros_like(response), prompt, **options)
+    permutation = np.array([9, 3, 5, 1, 8, 4, 0, 7, 2, 6])
+    permuted = profile_prompt_linkage(
+        response[permutation], np.zeros_like(response), prompt[permutation], **options)
+
+    pd.testing.assert_frame_equal(result, permuted)
+    row = result.iloc[0]
+    assert row["n_top_prompts"] == 5
+    assert row["strong_activation_threshold"] == 4
+    assert row["prompt_scope"] == "prompt_linked"
+    context = json.loads(row["top_prompt_contexts_json"])[0]
+    # Both requested scales still count, even though their realized sets coincide.
+    assert context["n_scales_passed"] == 2
+    for scale in context["scales"]:
+        assert scale["n_overlap"] == 4
+        assert scale["top_share"] == 0.8
+        assert scale["corpus_share"] == 0.4
+        assert scale["lift"] == 2.0
+        assert scale["q_value"] == pytest.approx(comb(5, 4) / comb(10, 4))
+
+
+def test_linkage_does_not_create_ties_by_rounding_float64_scores():
+    scores = np.array([1 + 3e-9, 1 + 2e-9, 1 + 1e-9, 1])[:, None]
+    row = profile_prompt_linkage(
+        scores, np.zeros_like(scores), scores, top_n=2, min_top_examples=1,
+        prompt_tail_fractions=(0.5,), min_stable_scales=1).iloc[0]
+
+    assert row["n_top_prompts"] == 2
+    assert row["strong_activation_threshold"] == scores[1, 0]
+    scale = json.loads(row["top_prompt_contexts_json"])[0]["scales"][0]
+    assert scale["n_overlap"] == 2
+    assert scale["corpus_share"] == 0.5
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf, 1 + 1j, "missing", None])
+@pytest.mark.parametrize("column", ["z_a", "z_b", "prompt_scores"])
+def test_linkage_rejects_nonfinite_or_nonreal_scores(bad, column):
+    inputs = {name: np.ones((2, 1)) for name in ("z_a", "z_b", "prompt_scores")}
+    inputs[column] = np.array([[bad], [1]])
+    with pytest.raises(ValueError, match="finite real scores"):
+        profile_prompt_linkage(**inputs)
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf, 1 + 1j, "missing", None])
+@pytest.mark.parametrize("column", ["z_a", "z_b"])
+def test_context_profile_rejects_nonfinite_or_nonreal_scores(bad, column):
+    inputs = {name: np.ones((2, 1)) for name in ("z_a", "z_b")}
+    inputs[column] = np.array([[bad], [1]])
+    calibration = pd.DataFrame({"feature_id": [0], "semantic_threshold": [0.5]})
+    with pytest.raises(ValueError, match="finite real scores"):
+        profile_feature_context(
+            **inputs, calibration=calibration, prompt_context=[0, 0],
+            model_a=["A", "A"], model_b=["B", "B"])
+
+
+def test_context_membership_rejects_complex_boolean_values():
+    with pytest.raises(ValueError, match="real numeric 0/1"):
+        _context_membership(np.array([[1 + 1j], [0]]))
+
+
+@pytest.mark.parametrize("empty_case", ["concordant", "failed_calibration", "empty_calibration", "no_rows"])
+def test_context_profile_empty_results_keep_full_columns(empty_case):
+    response = np.ones((2, 1))
+    calibration = pd.DataFrame({"feature_id": [0], "semantic_threshold": [0.5],
+                                "presence_pass": [True]})
+    full_features, full_models = profile_feature_context(
+        response, np.zeros_like(response), calibration, [0, 0], ["A", "A"], ["B", "B"])
+    other = response.copy()
+    contexts, model_a, model_b = [0, 0], ["A", "A"], ["B", "B"]
+    if empty_case == "failed_calibration":
+        calibration["presence_pass"] = False
+    elif empty_case == "empty_calibration":
+        calibration = calibration.iloc[:0]
+    elif empty_case == "no_rows":
+        response, other = response[:0], other[:0]
+        contexts, model_a, model_b = [], [], []
+    features, models = profile_feature_context(
+        response, other, calibration, contexts, model_a, model_b)
+
+    assert list(features.columns) == list(full_features.columns)
+    assert list(models.columns) == list(full_models.columns)
+    assert models.empty
+    assert features.empty == (empty_case in {"failed_calibration", "empty_calibration"})
+
+
+def test_linkage_empty_results_keep_full_columns():
+    scores = np.ones((2, 1))
+    full = profile_prompt_linkage(scores, scores, scores)
+    empty = profile_prompt_linkage(
+        scores, scores, scores,
+        features=pd.DataFrame({"feature_id": [0], "fidelity_pass": [False]}))
+    assert empty.empty
+    assert list(empty.columns) == list(full.columns)
+
+
+def test_context_profile_counts_typed_labels_separately_and_retains_json_ids():
+    labels = [1, 1, True, True, True, 1.0, "1", "1", "coding"]
+    n = len(labels)
+    response = np.ones((n, 1))
+    calibration = pd.DataFrame({"feature_id": [0], "semantic_threshold": [0.5]})
+    prompt_names = pd.DataFrame({
+        "feature_id": pd.Series([1, True, 1.0, "1", "coding"], dtype=object),
+        "concept": ["integer", "boolean", "float", "string", "topic"],
+    })
+    features, models = profile_feature_context(
+        response, np.zeros_like(response), calibration, labels, ["A"] * n, ["B"] * n,
+        prompt_names=prompt_names, min_context_occurrences=1,
+        min_model_context_battles=1, min_model_context_discordant=1)
+
+    assert features.loc[0, "n_supported_prompt_contexts"] == 5
+    assert features.loc[0, "max_prompt_context_share"] == 3 / n
+    contexts = json.loads(features.loc[0, "top_prompt_contexts_json"])
+    actual = {(type(row["prompt_feature_id"]), row["prompt_feature_id"]):
+              (row["n_present"], row["concept"]) for row in contexts}
+    expected = {(int, 1): (2, "integer"), (bool, True): (3, "boolean"),
+                (float, 1.0): (1, "float"), (str, "1"): (2, "string"),
+                (str, "coding"): (1, "topic")}
+    assert actual == expected
+    for model in models.itertuples():
+        assert model.n_supported_contexts == 5
+        effects = json.loads(model.top_contexts_json)
+        assert {(type(row["prompt_feature_id"]), row["prompt_feature_id"]):
+                (row["n_battles"], row["concept"]) for row in effects} == expected
+
+
+@pytest.mark.parametrize("bad_id", [0.9, True, 0.0, "0"])
+@pytest.mark.parametrize("source", ["features", "prompt_names", "prompt_context_ids"])
+def test_linkage_rejects_noninteger_ids(bad_id, source):
+    options = {source: [bad_id] if source == "prompt_context_ids" else pd.DataFrame({
+        "feature_id": pd.Series([bad_id], dtype=object), "concept": ["test"]})}
+    scores = np.ones((2, 1))
+    with pytest.raises(ValueError, match="non-boolean integers"):
+        profile_prompt_linkage(scores, scores, scores, **options)
+
+
+@pytest.mark.parametrize("bad_id", [-1, 1])
+def test_linkage_rejects_response_ids_outside_score_columns(bad_id):
+    scores = np.ones((2, 1))
+    with pytest.raises(ValueError, match="inside"):
+        profile_prompt_linkage(
+            scores, scores, scores, features=pd.DataFrame({"feature_id": [bad_id]}))
+
+
+def test_linkage_rejects_duplicate_context_ids_and_keeps_last_annotation():
+    scores = np.ones((2, 1))
+    with pytest.raises(ValueError, match="unique"):
+        profile_prompt_linkage(scores, scores, np.ones((2, 2)), prompt_context_ids=[2, 2])
+    result = profile_prompt_linkage(
+        scores, scores, scores, prompt_context_ids=[np.int64(2)],
+        features=pd.DataFrame({"feature_id": [0, 0], "concept": ["old", "new"]}),
+        prompt_names=pd.DataFrame({"feature_id": [2, 2], "concept": ["old", "new"]}))
+    assert result.loc[0, "concept"] == "new"
+    context = json.loads(result.loc[0, "top_prompt_contexts_json"])[0]
+    assert context["prompt_feature_id"] == 2
+    assert context["concept"] == "new"
+
+
+@pytest.mark.parametrize("bad_id", [0.9, True, 0.0, "0", -1, 1])
+def test_context_profile_rejects_invalid_calibration_ids(bad_id):
+    scores = np.ones((2, 1))
+    calibration = pd.DataFrame({"feature_id": pd.Series([bad_id], dtype=object),
+                                "semantic_threshold": [0.5]})
+    with pytest.raises(ValueError, match="non-boolean integers|inside"):
+        profile_feature_context(scores, scores, calibration, [0, 0], ["A", "A"], ["B", "B"])
+
+
+@pytest.mark.parametrize("dtype", [bool, np.int64, np.float32, np.float64])
+def test_context_profilers_accept_real_numeric_and_boolean_scores(dtype):
+    present = np.ones((2, 1), dtype=dtype)
+    absent = np.zeros_like(present)
+    linkage = profile_prompt_linkage(present, absent, present)
+    calibration = pd.DataFrame({"feature_id": [0], "semantic_threshold": [0.5]})
+    features, models = profile_feature_context(
+        present, absent, calibration, [0, 0], ["A", "A"], ["B", "B"])
+
+    assert linkage.loc[0, "n_top_prompts"] == 2
+    assert features.loc[0, "paired_choice_ratio"] == 1.0
+    assert len(models) == 2
