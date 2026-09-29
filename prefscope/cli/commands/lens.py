@@ -10,7 +10,7 @@ from prefscope.cli.data import (
     _cmd_embed_prompts,
     _cmd_encode_dataset,
 )
-from prefscope.cli.lens import _cmd_package_lens
+from prefscope.cli.lens import _cmd_package_bundle, _cmd_package_lens
 
 
 def register_lens_commands(sub) -> None:
@@ -338,6 +338,15 @@ def register_lens_commands(sub) -> None:
         default=None,
         help="interpretation directory or CSV files to bundle",
     )
+    ppack.add_argument(
+        "--derived-catalog", "--prompt-pole-catalog", dest="derived_catalog",
+        default=None,
+        help="optional derived-view annotation CSV or derived_feature_catalog.json",
+    )
+    ppack.add_argument("--derived-view", default="poles", dest="derived_view")
+    ppack.add_argument(
+        "--derived-transform", default="signed_to_poles", dest="derived_transform",
+    )
     ppack.add_argument("--out", required=True, help="destination artifact directory")
     ppack.add_argument(
         "--model-card",
@@ -347,6 +356,19 @@ def register_lens_commands(sub) -> None:
     ppack.add_argument("--device", default="cpu", choices=["cpu", "cuda", "mps"])
     ppack.add_argument("--overwrite", action="store_true")
     ppack.set_defaults(func=_cmd_package_lens)
+
+    pbundle = sub.add_parser(
+        "package-bundle",
+        help="atomically assemble packaged child lenses into one bundle",
+    )
+    pbundle.add_argument(
+        "--member", action="append", required=True, metavar="NAME=DIR",
+        help="packaged child lens; repeat for each bundle member",
+    )
+    pbundle.add_argument("--out", required=True, help="destination bundle directory")
+    pbundle.add_argument("--readme", default=None, help="optional root README.md")
+    pbundle.add_argument("--overwrite", action="store_true")
+    pbundle.set_defaults(func=_cmd_package_bundle)
 
     ped = sub.add_parser(
         "encode-dataset",

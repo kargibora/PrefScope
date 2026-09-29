@@ -33,6 +33,19 @@ from prefscope.api.feature_catalog_io import (
     save_feature_catalog,
 )
 from prefscope.api.loaded_lens import Lens
+from prefscope.api.lens_bundle import LensBundle
+from prefscope.api.derived_features import (
+    build_derived_catalog,
+    derive_feature_matrix,
+    load_derived_catalog,
+    validate_derived_catalog,
+)
+from prefscope.api.prompt_poles import (
+    build_prompt_pole_catalog,
+    expand_prompt_poles,
+    load_prompt_pole_catalog,
+    validate_prompt_pole_catalog,
+)
 from prefscope.api.representation import (
     EmbeddingRepresentationSource,
     PrecomputedRepresentationSource,
@@ -65,6 +78,44 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def load_bundle(
+    path,
+    *,
+    device: str = "cpu",
+    revision: str | None = None,
+    cache_dir=None,
+    token=None,
+    local_files_only: bool = False,
+    subfolder: str | None = None,
+    annotations=None,
+    derived_catalog=None,
+    validate_arrays: bool = True,
+):
+    """Load a validated bundle of independent lenses lazily."""
+    if str(path).startswith("hf://"):
+        from prefscope.api.hub import split_hf_source
+
+        repo_id, source_subfolder = split_hf_source(str(path))
+        if subfolder is not None and source_subfolder is not None:
+            raise ValueError(
+                "specify the Hub subfolder in either path or subfolder=, not both"
+            )
+        return LensBundle.from_pretrained(
+            repo_id, device=device, revision=revision, cache_dir=cache_dir,
+            token=token, local_files_only=local_files_only,
+            subfolder=subfolder or source_subfolder, annotations=annotations,
+            derived_catalog=derived_catalog, validate_arrays=validate_arrays,
+        )
+    if any(x is not None for x in (revision, cache_dir, token, subfolder)) or local_files_only:
+        raise ValueError(
+            "revision/cache_dir/token/local_files_only/subfolder are Hub-only options; "
+            "use hf://owner/repo or LensBundle.from_pretrained()"
+        )
+    return LensBundle.from_dir(
+        path, device=device, annotations=annotations,
+        derived_catalog=derived_catalog, validate_arrays=validate_arrays,
+    )
+
 def load_lens(
     path,
     *,
@@ -75,6 +126,8 @@ def load_lens(
     local_files_only: bool = False,
     subfolder: str | None = None,
     annotations=None,
+    derived_catalog=None,
+    prompt_pole_catalog=None,
     embedding_cache=None,
     embed_backend: str = "hf",
     embed_batch_size: int | None = None,
@@ -101,6 +154,7 @@ def load_lens(
             local_files_only=local_files_only,
             subfolder=subfolder or source_subfolder,
             annotations=annotations,
+            derived_catalog=derived_catalog or prompt_pole_catalog,
             embedding_cache=embedding_cache,
             embed_backend=embed_backend,
             embed_batch_size=embed_batch_size,
@@ -122,12 +176,16 @@ def load_lens(
         kwargs["embed_batch_size"] = embed_batch_size
     if annotations is not None:
         kwargs["annotations"] = annotations
+    if derived_catalog is not None or prompt_pole_catalog is not None:
+        kwargs["derived_catalog"] = derived_catalog or prompt_pole_catalog
     return Lens.load(path, **kwargs)
 
 
 __all__ = [
     "Lens",
+    "LensBundle",
     "load_lens",
+    "load_bundle",
     "PairItem",
     "Dataset",
     "RepresentationBatch",
@@ -141,6 +199,14 @@ __all__ = [
     "FeatureMatrix",
     "FeatureBatch",
     "FeatureCatalog",
+    "build_derived_catalog",
+    "derive_feature_matrix",
+    "load_derived_catalog",
+    "validate_derived_catalog",
+    "build_prompt_pole_catalog",
+    "expand_prompt_poles",
+    "load_prompt_pole_catalog",
+    "validate_prompt_pole_catalog",
     "decode_feature_catalog",
     "encode_feature_catalog",
     "load_feature_catalog",

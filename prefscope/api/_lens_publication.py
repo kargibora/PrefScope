@@ -14,6 +14,13 @@ import stat
 import uuid
 
 from prefscope.api._lens_annotations import _annotation_paths, _read_annotation_csv
+from prefscope.api.derived_features import (
+    DERIVED_FEATURE_CATALOG,
+    POLE_TRANSFORM,
+    build_derived_catalog,
+    load_derived_catalog,
+)
+from prefscope.api.feature_catalog_io import encode_feature_catalog
 from prefscope.artifacts import (
     FEATURE_CATALOG,
     FEATURE_NAMES,
@@ -259,10 +266,14 @@ def _materialize_feature_names(staging: Path, lens) -> Path:
 def _materialize_feature_catalog(staging: Path, lens, names_path: Path) -> Path:
     """Bundle the complete proposed-name catalog with explicit coordinate identity."""
     from prefscope.api.feature_catalog import FeatureCatalog
-    from prefscope.api.feature_catalog_io import encode_feature_catalog
 
     names = _read_annotation_csv(names_path)
     table = names[["feature_id", "concept"]].rename(columns={"concept": "name"})
+    description_column = next(
+        (column for column in ("description", "evidence_summary") if column in names), None
+    )
+    if description_column is not None:
+        table["description"] = names[description_column]
     try:
         identity = lens.feature_space_identity
     except (AttributeError, TypeError, ValueError):
@@ -305,7 +316,7 @@ def _materialize_feature_catalog(staging: Path, lens, names_path: Path) -> Path:
             "names_sha256": names_digest,
             **identity,
         },
-        column_sources={"name": source},
+        column_sources={column: source for column in ("name", "description") if column in table},
     )
     path = staging / FEATURE_CATALOG
     path.write_bytes(
@@ -314,9 +325,52 @@ encode_feature_catalog(catalog)
     return path
 
 
+def _derived_catalog_source(src: Path, annotations):
+    if annotations is None:
+        path = src / DERIVED_FEATURE_CATALOG
+        return path if path.is_file() else None
+    values = [annotations] if isinstance(annotations, (str, Path)) else list(annotations)
+    source = None
+    for value in values:
+        path = Path(value)
+        if path.is_dir():
+            path = path / DERIVED_FEATURE_CATALOG
+        if not path.is_file():
+            raise FileNotFoundError(f"derived catalog path does not exist: {path}")
+        source = path
+    return source
+
+
+def _materialize_derived_catalog(
+    staging: Path, lens, src: Path, annotations=None, *, view_name: str = "poles",
+    transform: str = POLE_TRANSFORM,
+):
+    source = _derived_catalog_source(src, annotations)
+    if source is None:
+        return None
+    width = int(lens.backend.m_total)
+    identity = lens.feature_space_identity
+    if source.suffix.lower() == ".csv":
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        catalog = build_derived_catalog(
+            _read_annotation_csv(source), native_width=width, view_name=view_name,
+            transform=transform, feature_space_id=identity.get("feature_space_id"),
+            source_name=source.name, source_sha256=digest,
+        )
+    else:
+        catalog = load_derived_catalog(
+            source, native_width=width, view_name=view_name, transform=transform,
+            feature_space_id=identity.get("feature_space_id"),
+        )
+    path = staging / DERIVED_FEATURE_CATALOG
+    path.write_bytes(encode_feature_catalog(catalog))
+    return path
+
+
 def save_lens(
     lens, dest, *, overwrite: bool = False, annotations=None,
-    inference_only: bool = False,
+    derived_catalog=None, prompt_pole_catalog=None, inference_only: bool = False,
+    derived_view: str = "poles", derived_transform: str = POLE_TRANSFORM,
 ):
     """Copy the backing lens dir to ``dest`` as a staged whole-directory replacement.
 
@@ -327,11 +381,16 @@ def save_lens(
     Existing destinations are restored if the final rename fails. A non-empty ``dest``
     is refused unless ``overwrite=True``.
     ``annotations`` may point to interpretation CSVs/directories to bundle into the
-    staged artifact before it is published or uploaded. ``inference_only=True``
+    staged artifact before it is published or uploaded. ``derived_catalog`` may
+    point to a derived-feature CSV or a validated JSON sidecar. ``derived_view`` and
+    ``derived_transform`` identify the declared view when packaging a CSV. ``inference_only=True``
     omits corpus-aligned ``z_*.npy``/battles/training files and rewrites the copied
     manifest as an inference artifact; this is the compact form intended for the
     Hugging Face Hub.
     """
+    if derived_catalog is not None and prompt_pole_catalog is not None:
+        raise ValueError("specify derived_catalog or prompt_pole_catalog, not both")
+    derived_catalog = derived_catalog or prompt_pole_catalog
     if dest is None:
         raise ValueError("save() requires a destination path")
     if lens.lens_dir is None:
@@ -340,10 +399,16 @@ def save_lens(
     dest = Path(dest)
     if not src.is_dir():
         raise ValueError(f"backing lens path must be a directory: {src}")
+    bundled_catalog = (src / DERIVED_FEATURE_CATALOG).is_file()
+    if (derived_catalog is not None or bundled_catalog) and lens.activation_polarity != "signed":
+        raise ValueError("signed_to_poles requires a signed native lens")
+    if derived_catalog is None and bundled_catalog:
+        derived_view, spec = next(iter(lens.derived_views.items()))
+        derived_transform = spec["transform"]
     src_resolved = src.resolve()
     dest_resolved = dest.resolve(strict=False)
     if src_resolved == dest_resolved:
-        if inference_only or annotations is not None:
+        if inference_only or annotations is not None or derived_catalog is not None:
             raise ValueError(
                 "cannot bundle annotations or create an inference-only artifact "
                 "in place; choose a different destination")
@@ -411,6 +476,20 @@ def save_lens(
                         shutil.copy2(path, staging / path.name)
             names_path = _materialize_feature_names(staging, lens)
             _materialize_feature_catalog(staging, lens, names_path)
+            if _materialize_derived_catalog(
+                staging, lens, src, derived_catalog, view_name=derived_view,
+                transform=derived_transform
+            ) is not None:
+                manifest_path = staging / MANIFEST
+                manifest = json.loads(manifest_path.read_text())
+                manifest["derived_views"] = {
+                    derived_view: {
+                        "source_view": {"prompt": "prompt", "individual": "response_a",
+                                        "difference": "response_difference"}[lens.input_rep],
+                        "transform": derived_transform,
+                    }
+                }
+                manifest_path.write_text(json.dumps(manifest, indent=2))
             if dest.exists():
                 os.replace(dest, backup)
             try:

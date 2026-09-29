@@ -34,6 +34,9 @@ _CATALOG_COLUMNS = {
     "source_ref",
     "evidence_layer",
     "retrieval_status",
+    "status",
+    "concept_type",
+    "confidence",
     "content_sha256",
 }
 
@@ -205,13 +208,23 @@ class FeatureCatalog:
         label_column = next(
             (column for column in ("concept", "name") if column in annotations), None
         )
-        if label_column is not None:
-            incoming = annotations[["feature_id", label_column]].rename(
-                columns={label_column: "name"}
-            )
-            names = names.merge(
-                incoming, on="feature_id", how="left", validate="one_to_one"
-            )
+        description_column = next(
+            (column for column in ("description", "evidence_summary") if column in annotations), None
+        )
+        for target, column in (("name", label_column), ("description", description_column)):
+            if column is not None:
+                incoming = annotations[["feature_id", column]].rename(columns={column: target})
+                names = names.merge(
+                    incoming, on="feature_id", how="left", validate="one_to_one"
+                )
+        for column in ("status", "concept_type", "confidence"):
+            if column in annotations:
+                names = names.merge(
+                    annotations[["feature_id", column]],
+                    on="feature_id",
+                    how="left",
+                    validate="one_to_one",
+                )
         identity = lens.feature_space_identity
         source = {
             "kind": "lens_annotation",
@@ -227,7 +240,11 @@ class FeatureCatalog:
                 "n_features": width,
                 **identity,
             },
-            column_sources={"name": source} if "name" in names else {},
+            column_sources={
+                column: source
+                for column in ("name", "description", "status", "concept_type", "confidence")
+                if column in names
+            },
         )
 
     @classmethod
@@ -298,6 +315,12 @@ class FeatureCatalog:
                 raise ValueError(
                     f"feature catalog is missing feature IDs {missing[:10]}"
                 )
+        catalog_coordinate = self.provenance.get("coordinate_space")
+        matrix_coordinate = matrix.provenance.get("coordinate_space")
+        if catalog_coordinate != matrix_coordinate and (
+            catalog_coordinate is not None or matrix_coordinate is not None
+        ):
+            raise ValueError("feature catalog and matrix use different coordinate spaces")
         matrix_id, matrix_status = matrix_feature_space_identity(matrix)
         if self.feature_space_id is not None and matrix_id is not None:
             if self.feature_space_id != matrix_id:
@@ -344,6 +367,10 @@ class FeatureCatalog:
         """Merge catalogs by ID; nonmissing values from ``other`` take precedence."""
         if not isinstance(other, FeatureCatalog):
             raise ValueError("other must be a FeatureCatalog")
+        self_coordinate = self.provenance.get("coordinate_space")
+        other_coordinate = other.provenance.get("coordinate_space")
+        if self_coordinate != other_coordinate:
+            raise ValueError("cannot merge catalogs from different coordinate spaces")
         if (
             self.feature_space_id is not None
             and other.feature_space_id is not None
@@ -394,6 +421,7 @@ class FeatureCatalog:
                 "sources": [dict(self.provenance), dict(other.provenance)],
                 "feature_space_id": feature_space_id,
                 "feature_space_status": feature_space_status,
+                **({"coordinate_space": self_coordinate} if self_coordinate is not None else {}),
             },
             column_sources=sources,
         )

@@ -2,9 +2,11 @@
 
 Feature values and feature annotations are separate evidence layers.
 
-`FeatureCatalog` can attach a proposed `name`, `description`, and related display fields to
-an explicit `feature_id`. A label does not change the numerical coordinate and does not by
-itself show that the feature detects the named concept.
+`FeatureCatalog` can attach a proposed `name`, `description`, `concept_type`, and
+related display fields to an explicit `feature_id`. `concept_type` is optional categorical
+metadata for organizing labels, such as separating subject matter from response behavior.
+It does not change the numerical coordinate or by itself show that the feature detects the
+named concept.
 
 Naming and verification tools may help researchers propose and inspect annotations, but
 their outputs remain study artifacts. The supported numerical analysis functions do not:

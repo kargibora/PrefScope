@@ -8,6 +8,7 @@ validates and opens the cached directory.
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import re
 
 from prefscope.artifacts import MANIFEST, SAE_MODEL
@@ -81,6 +82,34 @@ def resolve_hf_revision(
     return resolved.lower()
 
 
+
+def download_bundle(
+    repo_id: str, *, revision: str | None = None, cache_dir: str | Path | None = None,
+    token: str | bool | None = None, local_files_only: bool = False,
+    subfolder: str | None = None,
+    _resolved_revision: str | None = None,
+) -> Path:
+    """Download a bundle snapshot and validate its root manifest without loading Torch."""
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "LensBundle.from_pretrained() needs huggingface-hub; install or upgrade prefscope"
+        ) from exc
+    relative = _safe_subfolder(subfolder)
+    resolved_revision = _resolved_revision or resolve_hf_revision(
+        repo_id, revision=revision, repo_type="model", token=token,
+        local_files_only=local_files_only,
+    )
+    root = Path(snapshot_download(
+        repo_id, repo_type="model", revision=resolved_revision,
+        cache_dir=str(cache_dir) if cache_dir is not None else None, token=token,
+        local_files_only=local_files_only, library_name="prefscope",
+    )) / relative
+    from prefscope.api.lens_bundle import LensBundle
+    LensBundle.from_dir(root)
+    return root
+
 def download_lens(
     repo_id: str,
     *,
@@ -130,6 +159,15 @@ def download_lens(
         )
     )
     lens_dir = root / relative
+    root_manifest = lens_dir / MANIFEST
+    if root_manifest.is_file():
+        try:
+            if json.loads(root_manifest.read_text()).get("artifact_type") == "lens_bundle":
+                raise ValueError(
+                    "artifact is a lens bundle; use LensBundle/load_bundle or choose a subfolder"
+                )
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"invalid lens manifest in {lens_dir}") from exc
     missing = [name for name in (MANIFEST, SAE_MODEL) if not (lens_dir / name).is_file()]
     if missing:
         where = f" in subfolder {subfolder!r}" if subfolder else ""

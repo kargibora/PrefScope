@@ -35,6 +35,7 @@ Z_PROMPT = "z_prompt.npy"
 
 # --- prompt-lens interpret artifacts ---
 PROMPT_FEATURE_NAMES = "prompt_feature_names.csv"
+DERIVED_FEATURE_CATALOG = "derived_feature_catalog.json"
 PROMPT_FEATURE_FIDELITY = "prompt_feature_fidelity.csv"
 PROMPT_FEATURE_CLUSTERS = "prompt_feature_clusters.csv"
 
