@@ -23,6 +23,7 @@ config-driven CLI commands.
 - `prefscope embed-prompts`
 - `prefscope build-prompt-lens`
 - `prefscope package-lens`
+- `prefscope package-bundle` — package several independent child lenses under one explicit bundle manifest.
 
 Use each command's `--help` output for its alpha flags. Native lens training can require
 optional model and Torch dependencies.

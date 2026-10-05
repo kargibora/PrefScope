@@ -227,6 +227,31 @@ def test_catalog_from_lens_keeps_only_proposed_display_names():
     assert list(catalog.to_frame()) == ["feature_id", "name"]
     assert dict(catalog.labels) == {0: "a", 1: "b", 2: "c"}
 
+    lens.feature_table["evidence_summary"] = ["Activators show A.", None, ""]
+    rich = FeatureCatalog.from_lens(lens)
+    assert list(rich.to_frame()) == ["feature_id", "name", "description"]
+    assert rich.to_frame()["description"].fillna("missing").tolist() == ["Activators show A.", "missing", ""]
+    assert rich.column_sources["description"] == rich.column_sources["name"]
+    assert dict(rich.labels) == dict(catalog.labels)
+    lens.feature_table["description"] = ["Canonical A.", None, ""]
+    explicit = FeatureCatalog.from_lens(lens)
+    assert explicit.to_frame()["description"].fillna("missing").tolist() == ["Canonical A.", "missing", ""]
+
+    lens.feature_table["status"] = ["ok", "polysemantic", "insufficient_evidence"]
+    lens.feature_table["concept_type"] = ["topic", "mixed", "insufficient_evidence"]
+    lens.feature_table["confidence"] = ["high", "medium", "low"]
+    typed = FeatureCatalog.from_lens(lens)
+    assert typed.to_frame()["status"].tolist() == [
+        "ok", "polysemantic", "insufficient_evidence"
+    ]
+    assert typed.to_frame()["concept_type"].tolist() == [
+        "topic", "mixed", "insufficient_evidence"
+    ]
+    assert typed.to_frame()["confidence"].tolist() == ["high", "medium", "low"]
+    assert typed.column_sources["status"] == typed.column_sources["name"]
+    assert typed.column_sources["concept_type"] == typed.column_sources["name"]
+    assert typed.column_sources["confidence"] == typed.column_sources["name"]
+
 
 def test_renderer_includes_bounded_identity_for_multi_row_tables():
     table = pd.DataFrame(
@@ -373,3 +398,49 @@ def test_neuronpedia_provider_can_record_unavailable_without_error(monkeypatch):
     frame = catalog.to_frame()
     assert frame.loc[0, "retrieval_status"] == "unavailable"
     assert pd.isna(frame.loc[0, "description"])
+
+
+
+def test_lens_feature_catalog_respects_runtime_description_override(tmp_path):
+    import hashlib
+
+    from prefscope.api._lens_annotations import _load_feature_table
+    from prefscope.api.feature_catalog_io import encode_feature_catalog
+
+    (tmp_path / "sae_model.pt").write_bytes(b"weights")
+    names_path = tmp_path / "feature_names.csv"
+    names_path.write_text("feature_id,concept,description\n0,stable name,old description\n")
+    lens = Lens.__new__(Lens)
+    lens.lens_dir = tmp_path
+    lens.input_rep = "individual"
+    lens.projector = SimpleNamespace(m_total=1, input_dim=4)
+    lens.backend = SimpleNamespace(m_total=1)
+    lens.names = _load_feature_table(tmp_path, "individual", 1)
+    digest = hashlib.sha256(names_path.read_bytes()).hexdigest()
+    bundled = FeatureCatalog(
+        pd.DataFrame({
+            "feature_id": [0], "name": ["stable name"],
+            "description": ["old description"], "source_ref": ["bundled-only"],
+        }),
+        provenance={
+            "names_artifact": names_path.name, "names_sha256": digest,
+            **lens.feature_space_identity,
+        },
+        column_sources={
+            "name": {"artifact": names_path.name, "content_sha256": digest},
+        },
+    )
+    (tmp_path / "feature_catalog.json").write_bytes(encode_feature_catalog(bundled))
+    assert lens.feature_catalog.to_frame().loc[0, "source_ref"] == "bundled-only"
+
+    review = tmp_path / "review"
+    review.mkdir()
+    (review / "feature_names.csv").write_text(
+        "feature_id,concept,description,status\n0,stable name,new description,reviewed\n"
+    )
+    lens.names = _load_feature_table(tmp_path, "individual", 1, annotations=review)
+    assert lens.feature_table.loc[0, "description"] == "new description"
+    catalog = lens.feature_catalog.to_frame()
+    assert catalog.loc[0, "name"] == "stable name"
+    assert catalog.loc[0, "description"] == "new description"
+    assert catalog.loc[0, "status"] == "reviewed"

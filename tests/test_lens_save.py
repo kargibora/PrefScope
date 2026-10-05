@@ -67,6 +67,29 @@ def test_save_preserves_labels_that_match_pandas_na_tokens(tmp_path):
     assert "0,NA" in text and "1,N/A" in text and "2,null" in text
 
 
+@pytest.mark.parametrize("canonical", [False, True])
+def test_save_preserves_optional_naming_summary_as_description(tmp_path, canonical):
+    import pandas as pd
+    from prefscope import load_feature_catalog
+
+    src = _fake_lens_dir(tmp_path / "src")
+    names = pd.DataFrame({"feature_id": [0, 1], "concept": ["a", "b"],
+                          "evidence_summary": ["Activators show A.", None],
+                          "fidelity_pass": [True, False]})
+    if canonical:
+        names["description"] = ["Canonical A.", None]
+    names.to_csv(src / "feature_names.csv", index=False)
+    destination = _lens_with_dir(src).save(tmp_path / "published")
+    catalog = load_feature_catalog(destination / "feature_catalog.json")
+    frame = catalog.to_frame()
+    assert list(frame) == ["feature_id", "name", "description"]
+    assert frame.loc[0, "description"] == ("Canonical A." if canonical else "Activators show A.")
+    assert pd.isna(frame.loc[1, "description"])
+    assert dict(catalog.labels) == {0: "a", 1: "b"}
+    assert catalog.column_sources["description"] == catalog.column_sources["name"]
+    assert catalog.column_sources["description"]["artifact"] == "feature_names.csv"
+
+
 def test_save_into_empty_dest_ok(tmp_path):
     lens = _lens_with_dir(_fake_lens_dir(tmp_path / "src"))
     dest = tmp_path / "empty_dest"

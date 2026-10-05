@@ -21,6 +21,9 @@ For a repository containing prompt and response lenses, package them separately:
 prefscope package-lens \
   --lens-dir lenses/prompt \
   --annotations interpret/prompt \
+  --derived-catalog interpret/prompt/prompt_concept_names.csv \
+  --derived-view poles \
+  --derived-transform signed_to_poles \
   --out release/prompt-m256
 
 prefscope package-lens \
@@ -51,7 +54,9 @@ At minimum, document:
 - the license and intended/unsupported uses.
 
 The card must say when a signed legacy lens names only its positive pole. If calibration
-is incomplete, examples should use `mixed` only with the `presence_basis` field visible.
+is incomplete, examples should use `mixed` only with the `presence_basis` field visible. A
+derived feature catalog is an optional sidecar; it uses view-specific IDs and does not change the
+native lens width.
 
 ## 3. Upload
 
@@ -97,3 +102,21 @@ item = PairItem(
 features = response.featurize([item], views=("response_a",))
 print(features.matrix("z_a").values.shape)
 ```
+
+## Assemble a multi-lens bundle
+
+After packaging each child with `package-lens`, assemble them with one validated root:
+
+```bash
+prefscope package-bundle \
+  --member prompt=release/prompt-m256 \
+  --member completion=release/completion-m2048 \
+  --readme bundle-model-card.md \
+  --out release/prefscope-qwen3-bundle
+```
+
+Load a bundle with `load_bundle(...)`. Individual child directories remain loadable with
+`Lens.from_pretrained(..., subfolder=...)`. Bundle members retain separate coordinate
+spaces; their feature IDs and catalogs must not be merged. The bundle ID checks each
+member manifest and checkpoint (plus any whitener), not annotation or README bytes.
+Review those files before publication; the ID is not a signature.
