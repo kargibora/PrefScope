@@ -358,6 +358,8 @@ def classify_response_roles(
     work["feature_id"] = pd.to_numeric(work["feature_id"], errors="raise").astype(int)
     work = work.drop_duplicates("feature_id", keep="last")
     work = work[work["concept"].fillna("").astype(str).str.strip().ne("")]
+    if "status" in work:
+        work = work[~work["status"].isin(("polysemantic", "insufficient_evidence"))]
     wanted = None if features is None else {int(feature_id) for feature_id in features}
     if wanted is not None:
         work = work[work["feature_id"].isin(wanted)]

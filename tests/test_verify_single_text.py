@@ -107,7 +107,8 @@ class _FlakyClient:
 
 def test_verify_treats_failures_as_missing_not_negative():
     texts = [f"ZQX sample {i}" for i in range(5)] + [f"absent {i}" for i in range(5, 15)]
-    z = np.zeros((15, 1), dtype=np.float32); z[:5, 0] = 2.0
+    z = np.zeros((15, 1), dtype=np.float32)
+    z[:5, 0] = 2.0
     names = pd.DataFrame({"feature_id": [0], "concept": ["uses a special marker"]})
     out = verify_single_text_features(texts, z, names, _FlakyClient(),
                                       n_active=5, n_zero=5, verify_frac=1.0, seed=0)
@@ -120,29 +121,49 @@ def test_verify_treats_failures_as_missing_not_negative():
     assert row["correlation"] == pytest.approx(1.0)
 
 
-def test_verify_skips_abstained_names_and_excludes_from_bonferroni():
+@pytest.mark.parametrize(
+    ("skipped_status", "skipped_concept"),
+    [
+        ("polysemantic", "medical advice; source-code explanation"),
+        ("insufficient_evidence", "this text must still be skipped"),
+    ],
+)
+def test_verify_skips_abstained_names_and_excludes_from_bonferroni(
+        skipped_status, skipped_concept):
     texts = [f"ZQX sample {i}" for i in range(5)] + [f"absent {i}" for i in range(5, 15)]
-    z = np.zeros((15, 2), dtype=np.float32); z[:5, 0] = 2.0; z[:5, 1] = 2.0
+    z = np.zeros((15, 2), dtype=np.float32)
+    z[:5, 0] = 2.0
+    z[:5, 1] = 2.0
     names = pd.DataFrame({
         "feature_id": [0, 1],
-        "concept": ["uses a special marker", ""],      # feature 1 abstained
-        "status": ["ok", "polysemantic"],
+        "concept": ["uses a special marker", skipped_concept],
+        "status": ["ok", skipped_status],
     })
-    out = verify_single_text_features(texts, z, names, _FakeClient(),
+
+    class OneFeatureOnlyClient(_FakeClient):
+        def __init__(self): self.calls = 0
+        def raw(self, messages, **kwargs):
+            self.calls += 1
+            return super().raw(messages, **kwargs)
+
+    client = OneFeatureOnlyClient()
+    out = verify_single_text_features(texts, z, names, client,
                                       n_active=5, n_zero=5, verify_frac=1.0, seed=0)
     o = out.set_index("feature_id")
     # tested feature passes; abstained feature is re-attached as non-passing, never verified
     assert bool(o.loc[0]["fidelity_pass"]) is True
     assert bool(o.loc[1]["fidelity_pass"]) is False
-    assert o.loc[1]["skipped_reason"] == "polysemantic"
+    assert o.loc[1]["skipped_reason"] == skipped_status
     assert np.isnan(o.loc[1]["correlation"])           # LLM never asked about it
+    assert client.calls == 10                           # only feature 0: 5 active + 5 silent
     # Bonferroni over TESTED concepts only (m=1), so the tested feature still reaches p<0.05
     assert o.loc[0]["p_bonferroni"] < 0.05
 
 
 def test_low_success_rate_fails_the_fidelity_gate():
     texts = [f"ZQX {i}" for i in range(8)] + [f"absent {i}" for i in range(8, 24)]
-    z = np.zeros((24, 1), dtype=np.float32); z[:8, 0] = 2.0
+    z = np.zeros((24, 1), dtype=np.float32)
+    z[:8, 0] = 2.0
     names = pd.DataFrame({"feature_id": [0], "concept": ["uses a special marker"]})
     out = verify_single_text_features(texts, z, names, _FlakyClient(),
                                       n_active=8, n_zero=8, verify_frac=1.0, seed=0)
@@ -168,7 +189,8 @@ def test_verify_single_text_flags_nondiscriminating_feature():
 
 def test_similar_negatives_require_embeddings():
     texts = ["ZQX a", "ZQX b", "plain c", "plain d"]
-    z = np.zeros((4, 1), dtype=np.float32); z[:2, 0] = 1.0
+    z = np.zeros((4, 1), dtype=np.float32)
+    z[:2, 0] = 1.0
     names = pd.DataFrame({"feature_id": [0], "concept": ["uses a marker"]})
     with pytest.raises(ValueError):
         verify_single_text_features(texts, z, names, _FakeClient(),
@@ -182,9 +204,11 @@ def test_close_negatives_expose_overbroad_feature():
     texts = ([f"ZQX active {i}" for i in range(5)]
              + [f"ZQX silent {i}" for i in range(5)]
              + [f"plain silent {i}" for i in range(20)])
-    z = np.zeros((30, 1), dtype=np.float32); z[:5, 0] = 2.0
+    z = np.zeros((30, 1), dtype=np.float32)
+    z[:5, 0] = 2.0
     E = np.zeros((30, 2), dtype=np.float32)
-    E[:5] = [1.0, 0.0]; E[5:10] = [1.0, 0.05]      # ZQX-silent near the active set
+    E[:5] = [1.0, 0.0]
+    E[5:10] = [1.0, 0.05]      # ZQX-silent near the active set
     E[10:] = [0.0, 1.0]                            # plain-silent far away
     names = pd.DataFrame({"feature_id": [0], "concept": ["uses a special marker"]})
 

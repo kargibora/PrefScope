@@ -68,13 +68,14 @@ def test_save_preserves_labels_that_match_pandas_na_tokens(tmp_path):
 
 
 @pytest.mark.parametrize("canonical", [False, True])
-def test_save_preserves_optional_naming_summary_as_description(tmp_path, canonical):
+def test_save_publishes_only_reviewed_description(tmp_path, canonical):
     import pandas as pd
     from prefscope import load_feature_catalog
 
     src = _fake_lens_dir(tmp_path / "src")
     names = pd.DataFrame({"feature_id": [0, 1], "concept": ["a", "b"],
-                          "evidence_summary": ["Activators show A.", None],
+                          "evidence_summary": ["PRIVATE_PROMPT_MARKER", None],
+                          "status": ["ok", "polysemantic"],
                           "fidelity_pass": [True, False]})
     if canonical:
         names["description"] = ["Canonical A.", None]
@@ -82,12 +83,19 @@ def test_save_preserves_optional_naming_summary_as_description(tmp_path, canonic
     destination = _lens_with_dir(src).save(tmp_path / "published")
     catalog = load_feature_catalog(destination / "feature_catalog.json")
     frame = catalog.to_frame()
-    assert list(frame) == ["feature_id", "name", "description"]
-    assert frame.loc[0, "description"] == ("Canonical A." if canonical else "Activators show A.")
-    assert pd.isna(frame.loc[1, "description"])
+    assert "evidence_summary" not in pd.read_csv(destination / "feature_names.csv")
+    assert "PRIVATE_PROMPT_MARKER" not in (destination / "feature_names.csv").read_text()
+    assert "PRIVATE_PROMPT_MARKER" not in (destination / "feature_catalog.json").read_text()
     assert dict(catalog.labels) == {0: "a", 1: "b"}
-    assert catalog.column_sources["description"] == catalog.column_sources["name"]
-    assert catalog.column_sources["description"]["artifact"] == "feature_names.csv"
+    assert frame["status"].tolist() == ["ok", "polysemantic"]
+    assert catalog.column_sources["status"] == catalog.column_sources["name"]
+    if canonical:
+        assert list(frame) == ["feature_id", "name", "description", "status"]
+        assert frame.loc[0, "description"] == "Canonical A."
+        assert pd.isna(frame.loc[1, "description"])
+        assert catalog.column_sources["description"] == catalog.column_sources["name"]
+    else:
+        assert list(frame) == ["feature_id", "name", "status"]
 
 
 def test_save_into_empty_dest_ok(tmp_path):

@@ -18,7 +18,9 @@ their outputs remain study artifacts. The supported numerical analysis functions
 
 Keep annotations tied to the same feature-space identity as the activation matrix. Use
 `feature_activation_table(...)` for an explicit `feature_id` join. Review proposed labels
-and fidelity evidence before publication.
+and fidelity evidence before publication. Model-written `evidence_summary` notes stay in
+local naming results; public lens and Viewer exports use an explicitly reviewed
+`description` instead.
 
 Specialized labeling, calibration, and context routines are retained as recipe modules.
 They are not part of the stable numerical analysis API.

@@ -1,28 +1,80 @@
 from prefscope.interpret.prompts import (
-    load_prompt, parse_concept, parse_concept_result, parse_label,
+    load_prompt, parse_concept, parse_concept_result, parse_synthesis_result, parse_label,
     parse_support_audit, fmt_example, shield, truncate,
 )
 
 
 def test_parse_concept_result_status_and_abstention():
     ok = parse_concept_result('{"status":"ok","concept":"hedges the answer","confidence":"high"}')
-    assert ok == {"status": "ok", "concept": "hedges the answer", "confidence": "high"}
-    # abstentions carry NO forced concept
+    assert ok == {"status": "ok", "concept": "hedges the answer", "confidence": "high",
+                  "evidence_summary": ""}
+    # Backward compatibility: old polysemantic outputs may still have no description.
     poly = parse_concept_result('{"status":"polysemantic","concept":null}')
     assert poly["status"] == "polysemantic" and poly["concept"] == ""
-    insuf = parse_concept_result('{"status":"insufficient_evidence","concept":null}')
+    described = parse_concept_result(
+        '{"status":"polysemantic","concept":"database queries; table formatting",'
+        '"confidence":"medium"}')
+    assert described["concept"] == "database queries; table formatting"
+    bounded = parse_concept_result(
+        '{"status":"polysemantic","concept":"one cluster; two cluster; three cluster; '
+        'four cluster","confidence":"low"}')
+    assert bounded["concept"] == "one cluster; two cluster; three cluster"
+    one_word = parse_concept_result(
+        '{"status":"polysemantic","concept":"French; Spanish","confidence":"medium"}')
+    assert one_word["concept"] == "French; Spanish"
+    compound_ok = parse_concept_result(
+        '{"status":"ok","concept":"medical guidance; source-code explanation",'
+        '"confidence":"high"}')
+    assert compound_ok == {
+        "status": "polysemantic",
+        "concept": "medical guidance; source-code explanation",
+        "confidence": "high",
+        "evidence_summary": "",
+    }
+    insuf = parse_concept_result('{"status":"insufficient_evidence",'
+                                 '"concept":"must be discarded"}')
     assert insuf["concept"] == ""
     # "ok" with an empty phrase is really an abstain
     assert parse_concept_result('{"status":"ok","concept":""}')["status"] == "insufficient_evidence"
     # back-compat: a bare {"concept": ...} or plain phrase -> ok
     assert parse_concept_result('{"concept":"uses code blocks"}') == \
-        {"status": "ok", "concept": "uses code blocks", "confidence": ""}
+        {"status": "ok", "concept": "uses code blocks", "confidence": "",
+         "evidence_summary": ""}
+
+
+
+
+def test_plain_mixed_label_and_failed_synthesis_stay_unverified():
+    mixed = parse_concept_result('- "medical guidance; source-code explanation"')
+    assert mixed["status"] == "polysemantic"
+    assert mixed["concept"] == "medical guidance; source-code explanation"
+    assert parse_synthesis_result("synthesis failed", [mixed]) == mixed
+    assert parse_synthesis_result('{"status":"insufficient_evidence"}', [mixed])["status"] == (
+        "insufficient_evidence"
+    )
+
+
+def test_parse_concept_result_preserves_visible_evidence_summary():
+    result = parse_concept_result(
+        '{"status":"ok","concept":"asks for code","confidence":"high",'
+        '"evidence_summary":"  Ten activators request implementations.  Controls ask for explanations.  "}'
+    )
+    assert result["evidence_summary"] == (
+        "Ten activators request implementations. Controls ask for explanations."
+    )
+    abstain = parse_concept_result(
+        '{"status":"insufficient_evidence","concept":null,"confidence":"low",'
+        '"evidence_summary":"Activators do not share a stable property."}'
+    )
+    assert abstain["concept"] == ""
+    assert abstain["evidence_summary"] == "Activators do not share a stable property."
 
 
 def test_parse_concept_result_error_sentinel_is_missing():
     # API failure / empty reply must never leak in as a concept name
     assert parse_concept_result("<<ERROR: empty response>>") == \
-        {"status": "insufficient_evidence", "concept": "", "confidence": ""}
+        {"status": "insufficient_evidence", "concept": "", "confidence": "",
+         "evidence_summary": ""}
     assert parse_concept_result("")["status"] == "insufficient_evidence"
     assert parse_concept_result("   ")["concept"] == ""
 

@@ -208,9 +208,7 @@ class FeatureCatalog:
         label_column = next(
             (column for column in ("concept", "name") if column in annotations), None
         )
-        description_column = next(
-            (column for column in ("description", "evidence_summary") if column in annotations), None
-        )
+        description_column = "description" if "description" in annotations else None
         for target, column in (("name", label_column), ("description", description_column)):
             if column is not None:
                 incoming = annotations[["feature_id", column]].rename(columns={column: target})

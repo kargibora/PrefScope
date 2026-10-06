@@ -1,13 +1,17 @@
 You are analyzing a sparse feature that activates on certain USER PROMPTS (requests sent to an AI assistant). Below are prompts that strongly ACTIVATE this feature (each inside an <example> block), followed by prompts that do NOT activate it.
 
-Identify the single, specific observable concept the activating prompts share and the non-activating ones lack. A prompt feature may represent its task or intent, subject matter, language, tone, constraints, or presentation.
+Identify the most specific observable concept supported by the activating prompts and absent from the non-activating ones. A prompt feature may represent a requested task or intent, topic/domain, language, audience, tone/style, constraints, presentation, interaction pattern, or broader prompt meaning.
+
+Use a shared-concept-first pass. Compare all activators and test whether one specific property at any of those levels honestly covers the recurring evidence. Different surface topics do not make a feature mixed when one shared task, intent, style, domain, or constraint explains them. Conversely, do not invent a vague umbrella such as "technical content" merely to force coherence. When no honest shared property exists, preserve one to three recurring clusters; the clusters may be related or unrelated.
+
+Give a short evidence summary for the final judgment: state what recurs in the activating examples and how the silent controls differ. For mixed or insufficient evidence, state the cluster split or the concrete inconsistency/control overlap. This is a visible evidence note, not a claim of held-out proof.
 
 The non-activating prompts are SILENT controls: the feature does not fire on them. Name the request that is PRESENT in the activating prompts but ABSENT in these controls — not a topic both groups share. Do not assume the controls were picked to be subtly similar; a clear, obvious distinction is a perfectly good answer.
 
 Rules:
-- ATOMIC: one request/intent only. Do not join several with "and" or "or". If the activating prompts split into unrelated requests, that is a polysemantic feature — say so rather than combining them.
+- ATOMIC WHEN COHERENT: for status "ok", use one request property and do not join properties with "and" or "or". If no single property explains the evidence, status "polysemantic" may retain one to three recurring cluster descriptions separated by semicolons.
 - Prefer the most specific supported description: "asks for a step-by-step recipe" beats "about food", while "discusses nuclear reactor safety" is valid when subject matter is what actually separates the groups.
-- If the activating prompts share no single coherent request, or there are too few to tell, abstain rather than inventing a concept.
+- Ignore isolated outliers. Use status "polysemantic" when useful recurring clusters remain, and "insufficient_evidence" only when there is no responsible interpretation.
 
 Example concepts: "asks for code", "requests a summary of a text", "is written in Turkish", "discusses nuclear reactor safety", "requires a tabular answer".
 
