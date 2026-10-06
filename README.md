@@ -43,6 +43,28 @@ to keep in later sync commands.
 
 A plain `import prefscope` stays Torch-free.
 
+## Try a prompt
+
+This [public Arena prompt lens](https://huggingface.co/kbora/prefscope-qwen3-prompt-m256)
+uses Qwen3-Embedding-8B and needs a GPU with enough memory and a compatible PyTorch build.
+
+```python
+from prefscope import Lens, PairItem, feature_activation_table
+
+lens = Lens.from_pretrained(
+    "kbora/prefscope-qwen3-prompt-m256",
+    revision="29b8a807d418c2c22de65e32d6fc7e595bb7fb50",
+    device="cuda",
+)
+item = PairItem(id="example", x="How to find the minimum of a function", y_a="")
+poles = lens.featurize_derived([item], view="poles")
+table = feature_activation_table(poles, catalog=lens.catalog_for("poles"), top_k=5)
+print(table[["activation", "name", "status"]].to_string(index=False))
+```
+
+The first two matches are mathematical problem solving and functions; names are
+unverified proposals, and activations are not probabilities.
+
 ## Featurize response pairs
 
 ```python
