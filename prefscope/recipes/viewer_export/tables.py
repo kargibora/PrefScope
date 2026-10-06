@@ -222,4 +222,5 @@ def export_prompt_features(interpret_dir) -> dict | None:
         _label_or_id(value, feature_id, prefix="prompt feature")
         for value, feature_id in zip(df["concept"], df["feature_id"])
     ]
-    return {"features": _round(df)}
+    # A generated evidence note may quote private examples; publish only reviewed descriptions.
+    return {"features": _round(df.drop(columns=["evidence_summary"], errors="ignore"))}

@@ -86,42 +86,94 @@ def parse_concept(response: str) -> str:
 _STATUSES = ("ok", "polysemantic", "insufficient_evidence")
 
 
-def parse_concept_result(response: str) -> dict:
-    """Parse the structured naming output ``{status, concept, confidence}``.
+def _evidence_summary(obj: dict) -> str:
+    """Normalize a short model-written account of the displayed evidence."""
+    value = obj.get("evidence_summary")
+    if value in (None, "", "null"):
+        return ""
+    # This is a visible evidence note, not hidden reasoning. Keep it bounded and flat so
+    # one verbose provider cannot dominate checkpoints or CSV exports.
+    return " ".join(str(value).strip().split())[:1500]
 
-    Abstention is first-class: ``status`` in {ok, polysemantic, insufficient_evidence}.
-    For a non-ok status we return an EMPTY concept — the feature is flagged, never
-    force-named. Back-compat: a bare ``{"concept": "..."}`` or a plain phrase parses as
-    ``status="ok"`` so old prompts/models keep working."""
+
+def _polysemantic_label(concept: str) -> str:
+    """Normalize at most three explicitly structured mixed-evidence clusters."""
+    clusters = [_clean_phrase(part) for part in concept.split(";")]
+    clusters = [part for part in clusters
+                if part and not part.endswith("?") and _NON_CONCEPT.match(part) is None]
+    return "; ".join(clusters[:3])
+
+
+def parse_concept_result(response: str) -> dict:
+    """Parse structured naming output plus an optional visible evidence summary.
+
+    Older three-field objects remain valid and receive an empty ``evidence_summary``.
+    ``ok`` carries one atomic hypothesis. ``polysemantic`` may carry a descriptive
+    semicolon-separated label for recurring clusters, but remains an abstention for
+    downstream verification. ``insufficient_evidence`` always has an empty concept.
+    Back-compat: old null polysemantic outputs, bare concept JSON, and plain phrases work.
+    """
     cleaned = re.sub(r"(?is)<think>.*?</think>", "", response or "").strip()
-    # An empty reply or the name.py error sentinel (`<<ERROR: ...>>`) is a MISSING naming,
-    # not a concept — never let it leak in as a feature label.
     if not cleaned or cleaned.startswith("<<ERROR"):
-        return {"status": "insufficient_evidence", "concept": "", "confidence": ""}
+        return {"status": "insufficient_evidence", "concept": "", "confidence": "",
+                "evidence_summary": ""}
     try:
         obj = json.loads(cleaned)
     except Exception:
         obj = None
     if isinstance(obj, dict):
-        # Fail CLOSED on a malformed structured response: an unrecognized status is an
-        # abstain, not an "ok" (#6) — the old code turned unknown status into ok.
         status = str(obj.get("status") or "ok").strip().lower()
         if status not in _STATUSES:
             status = "insufficient_evidence"
         confidence = str(obj.get("confidence") or "").strip().lower()
         if confidence not in ("high", "medium", "low"):
-            confidence = ""                    # validate, don't pass junk through
+            confidence = ""
         c = obj.get("concept")
         concept = "" if c in (None, "", "null") else _clean_phrase(str(c))
-        if status != "ok":
-            concept = ""                       # abstain -> no forced label
-        elif not _looks_like_concept(concept):
-            status, concept = "insufficient_evidence", ""   # "ok" but no real phrase -> abstain
-        return {"status": status, "concept": concept, "confidence": confidence}
-    # non-JSON fallback: reuse the legacy extractor, treat as ok
+        if status == "insufficient_evidence":
+            concept = ""
+        elif status == "ok" and len([part for part in concept.split(";") if part.strip()]) > 1:
+            status, concept = "polysemantic", _polysemantic_label(concept)
+        elif status == "ok" and not _looks_like_concept(concept):
+            status, concept = "insufficient_evidence", ""
+        elif status == "polysemantic":
+            concept = _polysemantic_label(concept)
+        return {"status": status, "concept": concept, "confidence": confidence,
+                "evidence_summary": _evidence_summary(obj)}
     concept = parse_concept(response)
+    if len([part for part in concept.split(";") if part.strip()]) > 1:
+        return {"status": "polysemantic", "concept": _polysemantic_label(concept),
+                "confidence": "", "evidence_summary": ""}
     return {"status": "ok" if concept else "insufficient_evidence",
-            "concept": concept, "confidence": ""}
+            "concept": concept, "confidence": "", "evidence_summary": ""}
+
+
+def fallback_concept_result(candidates: list[dict]) -> dict:
+    """Choose a conservative usable proposal when synthesis fails."""
+    for status in ("polysemantic", "ok"):
+        for candidate in candidates:
+            if candidate.get("status") == status and candidate.get("concept"):
+                return candidate
+    return {"status": "insufficient_evidence", "concept": "", "confidence": "low",
+            "evidence_summary": ""}
+
+
+def parse_synthesis_result(response: str, candidates: list[dict]) -> dict:
+    """Parse synthesis, falling back only when its response is malformed or empty."""
+    cleaned = re.sub(r"(?is)<think>.*?</think>", "", response or "").strip()
+    try:
+        obj = json.loads(cleaned)
+    except Exception:
+        obj = None
+    if not isinstance(obj, dict):
+        return fallback_concept_result(candidates)
+    result = parse_concept_result(cleaned)
+    if result["status"] != "insufficient_evidence":
+        return result
+    status = str(obj.get("status") or "").strip().lower()
+    if status and status not in ("ok", "polysemantic"):
+        return result
+    return fallback_concept_result(candidates)
 
 
 def parse_support_audit(response: str, *, n_active: int, n_control: int) -> dict:

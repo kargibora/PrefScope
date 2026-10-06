@@ -227,11 +227,9 @@ def test_catalog_from_lens_keeps_only_proposed_display_names():
     assert list(catalog.to_frame()) == ["feature_id", "name"]
     assert dict(catalog.labels) == {0: "a", 1: "b", 2: "c"}
 
-    lens.feature_table["evidence_summary"] = ["Activators show A.", None, ""]
+    lens.feature_table["evidence_summary"] = ["PRIVATE_PROMPT_MARKER", None, ""]
     rich = FeatureCatalog.from_lens(lens)
-    assert list(rich.to_frame()) == ["feature_id", "name", "description"]
-    assert rich.to_frame()["description"].fillna("missing").tolist() == ["Activators show A.", "missing", ""]
-    assert rich.column_sources["description"] == rich.column_sources["name"]
+    assert list(rich.to_frame()) == ["feature_id", "name"]
     assert dict(rich.labels) == dict(catalog.labels)
     lens.feature_table["description"] = ["Canonical A.", None, ""]
     explicit = FeatureCatalog.from_lens(lens)

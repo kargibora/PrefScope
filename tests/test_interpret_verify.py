@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+from prefscope.interpret.prompts import parse_concept_result
 from prefscope.interpret.verify import compute_metrics, verify_features
 
 
@@ -85,3 +86,26 @@ def test_verify_stratified_random_respects_total_example_budget():
     assert row["n_attempted"] == 31
     assert row["n_pos_ok"] == 11 and row["n_neg_ok"] == 10
     assert bool(row["fidelity_pass"]) is True
+
+
+def test_pairwise_verifier_skips_all_non_ok_names_including_compound_ok_output():
+    parsed = parse_concept_result(
+        '{"status":"ok","concept":"medical guidance; source-code explanation",'
+        '"confidence":"high"}')
+    assert parsed["status"] == "polysemantic"
+    names = pd.DataFrame({
+        "feature_id": [0, 1],
+        "concept": [parsed["concept"], "must not be verified"],
+        "status": [parsed["status"], "insufficient_evidence"],
+    })
+
+    class NoCallClient:
+        def raw(self, messages, **kw):
+            raise AssertionError("non-ok names must not reach verification")
+
+    out = verify_features(
+        _battles(20), np.zeros((20, 2), dtype=np.float32), names, NoCallClient(),
+        n_per_bucket=3, verify_frac=1.0, seed=0)
+    assert not out["fidelity_pass"].any()
+    assert set(out["skipped_reason"]) == {"polysemantic", "insufficient_evidence"}
+    assert out["correlation"].isna().all()

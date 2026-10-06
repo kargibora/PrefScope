@@ -5,6 +5,10 @@ the `0.x` series is an alpha API and may still evolve with explicit release note
 
 ## 0.3.1 — Unreleased
 
+- Unified prompt and response concept naming around recurring evidence, descriptive
+  polysemantic labels, and local evidence summaries. Mixed labels remain unverified and
+  are not sent to response-role classification. Public exports require reviewed
+  descriptions rather than publishing model-written evidence notes by default.
 - Fixed the release test environment to install the `cluster` extra, matching CI.
   The full test suite requires `igraph` and `leidenalg` for the clustering recipes.
   Base package dependencies are unchanged.

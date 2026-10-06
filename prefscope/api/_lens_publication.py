@@ -259,7 +259,10 @@ def _materialize_feature_names(staging: Path, lens) -> Path:
         frame = pd.DataFrame(
             {"feature_id": range(width), "concept": [None] * width}
         )
-    frame.to_csv(path, index=False, lineterminator="\n")
+    # Model-written evidence notes stay local unless explicitly reviewed as descriptions.
+    frame.drop(columns=["evidence_summary"], errors="ignore").to_csv(
+        path, index=False, lineterminator="\n"
+    )
     return path
 
 
@@ -269,11 +272,10 @@ def _materialize_feature_catalog(staging: Path, lens, names_path: Path) -> Path:
 
     names = _read_annotation_csv(names_path)
     table = names[["feature_id", "concept"]].rename(columns={"concept": "name"})
-    description_column = next(
-        (column for column in ("description", "evidence_summary") if column in names), None
-    )
-    if description_column is not None:
-        table["description"] = names[description_column]
+    if "description" in names:
+        table["description"] = names["description"]
+    if "status" in names:
+        table["status"] = names["status"]
     try:
         identity = lens.feature_space_identity
     except (AttributeError, TypeError, ValueError):
@@ -316,7 +318,8 @@ def _materialize_feature_catalog(staging: Path, lens, names_path: Path) -> Path:
             "names_sha256": names_digest,
             **identity,
         },
-        column_sources={column: source for column in ("name", "description") if column in table},
+        column_sources={column: source for column in ("name", "description", "status")
+                        if column in table},
     )
     path = staging / FEATURE_CATALOG
     path.write_bytes(

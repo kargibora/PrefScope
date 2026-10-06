@@ -6,7 +6,9 @@ You are given several RESPONSES that strongly activate the feature (each inside 
 
 # Instructions
 
-Identify the single, specific property most clearly enriched in the HIGH-ACTIVATING responses relative to the NON-ACTIVATING ones.
+Identify the specific property most clearly enriched in the HIGH-ACTIVATING responses relative to the NON-ACTIVATING ones. Use a shared-concept-first pass across content/intent, topic, language, audience, constraints, style, presentation, interaction behavior, and broader response meaning. Prefer one specific coherent property when it honestly covers the recurring evidence. If none explains the evidence but useful recurring clusters remain, retain one to three cluster descriptions—related or unrelated—rather than inventing a vague umbrella.
+
+Give a short evidence summary for the final judgment: state what recurs in activating responses and how controls differ. For mixed or insufficient evidence, identify the cluster split or concrete inconsistency/control overlap. This is a visible evidence note, not held-out proof.
 
 This stage proposes a hypothesis that will be tested later on disjoint held-out responses. Test the same candidate separately against every displayed response and report those matches honestly. A useful candidate must recur across a clear majority of activators and be more prevalent there than in controls; never infer a direction from one salient outlier. An occasional naming-set counterexample makes the hypothesis less certain, but does not by itself prove that the feature lacks that behavior.
 
@@ -25,12 +27,12 @@ against a menu of suggested feature labels; derive the property only from the di
 evidence.
 
 ## Rules
-- ATOMIC: one property only. Do not join several with "and" or "or". If the activating responses share several unrelated properties, that is a polysemantic feature — say so (status) rather than combining them into one label.
+- ATOMIC WHEN COHERENT: for status "ok", use one property and do not join properties with "and" or "or". For status "polysemantic", describe one to three recurring clusters separated by semicolons. This is a mixed-evidence description, not separate learned features or verified semantic presence.
 - The property is normally something the response HAS, but it MAY be a specific, observable OMISSION or avoidance when that is genuinely what the activating responses share — e.g. "answers without citing sources", "declines to give a direct recommendation", "gives no worked example". Name the omission itself; do not invent a correlated positive property to avoid it. It must still be directly observable in the response, not a guess about the topic.
 - A property of a single response — no comparatives ("more", "less", "instead of").
 - Objective and concrete ("is helpful" is too vague).
 - Judge it in the RESPONSE; do not name a property of the prompt.
-- If the activating responses share no recurring coherent property, the candidate is no more prevalent among activators than controls, or there are too few/weak examples to form a useful hypothesis, abstain (status polysemantic / insufficient_evidence) instead of inventing a label.
+- Use status "polysemantic" when no single property explains the evidence but one to three useful recurring clusters can be described. Use "insufficient_evidence" only when the evidence supports no responsible interpretation. Ignore isolated outliers.
 
 # Examples
 

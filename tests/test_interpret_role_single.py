@@ -83,3 +83,20 @@ def test_paired_path_still_requires_matching_shapes():
     names = pd.DataFrame({"feature_id": [0], "concept": ["c"]})
     with pytest.raises(ValueError):
         classify_response_roles(_battles(), z, np.zeros((5, 1), np.float32), names, _Client())
+
+
+def test_classify_response_roles_skips_descriptive_mixed_labels():
+    z_a = np.zeros((6, 3), dtype=np.float32)
+    z_a[:3, :] = 1.0
+    names = pd.DataFrame({
+        "feature_id": [0, 1, 2],
+        "concept": ["medicine; code", "uncertain label", "uses headings"],
+        "status": ["polysemantic", "insufficient_evidence", "ok"],
+    })
+    client = _Client()
+    out = classify_response_roles(
+        _battles(paired=False), z_a, None, names, client,
+        n_top=3, n_random=0, min_valid_examples=1,
+    )
+    assert out["feature_id"].tolist() == [2]
+    assert len(client.prompts) == 1

@@ -121,6 +121,7 @@ def test_prompt_feature_export_keeps_named_axes_without_fidelity_rows(tmp_path):
         "feature_id": [0, 1, 2],
         "concept": ["translation", "mathematics", "code"],
         "status": ["ok", "ok", "insufficient_evidence"],
+        "evidence_summary": ["PRIVATE_PROMPT_MARKER", "review note", None],
     }).to_csv(tmp_path / "prompt_feature_names.csv", index=False)
     pd.DataFrame({
         "feature_id": [1],
@@ -134,6 +135,7 @@ def test_prompt_feature_export_keeps_named_axes_without_fidelity_rows(tmp_path):
     by_id = {row["feature_id"]: row for row in exported["features"]}
     assert by_id[1]["fidelity_pass"] is True
     assert by_id[0]["fidelity_pass"] is None
+    assert all("evidence_summary" not in row for row in exported["features"])
 
 
 @pytest.mark.parametrize("value", [None, np.nan, "", "   ", "nan", " NaN "])

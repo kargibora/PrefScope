@@ -17,12 +17,14 @@ class FakeClient:
         props = schema["properties"]
         if "active_matches" not in props:       # multi-candidate synthesis
             return json.dumps({
-                "status": "ok", "concept": "explains a word", "confidence": "high"})
+                "status": "ok", "concept": "explains a word", "confidence": "high",
+                "evidence_summary": "Activators define words; controls do not."})
         n_active = props["active_matches"]["minItems"]
         n_control = props["control_matches"]["minItems"]
         evidence = {
             "active_matches": [True] * n_active,
             "control_matches": [False] * n_control,
+            "evidence_summary": "Activators define words; controls do not.",
         }
         if "status" in props:                 # proposal call
             evidence.update(status="ok", concept="explains a word", confidence="high")
@@ -46,6 +48,9 @@ def test_individual_naming_shows_single_responses_not_pairs():
                                   verify_frac=0.0, concurrency=1)
 
     assert df.iloc[0]["concept"] == "explains a word"
+    assert df.iloc[0]["evidence_summary"] == (
+        "Activators define words; controls do not."
+    )
     p = fc.prompts[0]
     # single-response framing, NOT the A/B pair contrast
     assert "RESPONSE:" in p
@@ -94,7 +99,8 @@ def test_close_negatives_pick_similar_controls():
     })
     z_a = np.zeros((n, 3), dtype=np.float32)
     z_b = np.zeros((n, 3), dtype=np.float32)
-    z_a[:4, 0] = 2.0; z_a[:4, 1] = 1.0            # activators: f0 + concept 1
+    z_a[:4, 0] = 2.0
+    z_a[:4, 1] = 1.0            # activators: f0 + concept 1
     z_a[4:20, 1] = 1.0                            # silent-on-f0 but share concept 1 (close)
     z_a[20:, 2] = 1.0                             # silent-on-f0, share concept 2 (far)
     fc = FakeClient()
@@ -117,7 +123,8 @@ def test_multi_candidate_final_concept_is_reviewed_over_union():
         "completion_a": [f"DEFINITION {i}" for i in range(n)],
         "completion_b": [f"other {i}" for i in range(n)],
     })
-    z_a = np.zeros((n, 1), dtype=np.float32); z_a[:8, 0] = 1.0
+    z_a = np.zeros((n, 1), dtype=np.float32)
+    z_a[:8, 0] = 1.0
     z_b = np.zeros((n, 1), dtype=np.float32)
     client = FakeClient()
     row = name_individual_features(
@@ -181,7 +188,8 @@ def test_individual_reviewer_abstains_from_one_example_pattern():
         "instruction_id": [str(i) for i in range(n)], "prompt": [f"p{i}" for i in range(n)],
         "completion_a": [f"a{i}" for i in range(n)],
         "completion_b": [f"b{i}" for i in range(n)]})
-    z_a = np.zeros((n, 1), dtype=np.float32); z_a[:3, 0] = 1.0
+    z_a = np.zeros((n, 1), dtype=np.float32)
+    z_a[:3, 0] = 1.0
     z_b = np.zeros((n, 1), dtype=np.float32)
 
     class HonestEvidenceClient:
@@ -216,7 +224,8 @@ def test_individual_screen_rejects_candidate_not_enriched_over_controls():
         "completion_a": [f"a{i}" for i in range(n)],
         "completion_b": [f"b{i}" for i in range(n)],
     })
-    z_a = np.zeros((n, 1), dtype=np.float32); z_a[:3, 0] = 1.0
+    z_a = np.zeros((n, 1), dtype=np.float32)
+    z_a[:3, 0] = 1.0
     z_b = np.zeros((n, 1), dtype=np.float32)
 
     class NoSeparationClient:
@@ -232,5 +241,116 @@ def test_individual_screen_rejects_candidate_not_enriched_over_controls():
         n_active=3, n_zero=3, verify_frac=0.0).iloc[0]
     assert row["status"] == "insufficient_evidence" and row["concept"] == ""
     assert row["reviewed_concept"] == "uses detailed steps"
+    assert row["evidence_summary"] == (
+        "Only 2 of 3 activators match the proposed property, while 2 of 3 silent controls "
+        "also match; the naming evidence does not support a separating atomic concept."
+    )
     assert not row["naming_screen_pass"]
     assert row["naming_review_action"] == "abstained_no_separation"
+
+
+def test_multi_candidate_final_screen_replaces_contradictory_evidence_summary():
+    n = 16
+    battles = pd.DataFrame({
+        "instruction_id": [str(i) for i in range(n)],
+        "prompt": [f"p{i}" for i in range(n)],
+        "completion_a": [f"a{i}" for i in range(n)],
+        "completion_b": [f"b{i}" for i in range(n)],
+    })
+    z_a = np.zeros((n, 1), dtype=np.float32)
+    z_a[:7, 0] = 1.0
+    z_b = np.zeros((n, 1), dtype=np.float32)
+
+    class FinalOverlapClient:
+        def __init__(self): self.calls = 0
+        def raw(self, messages, **kw):
+            self.calls += 1
+            props = kw["response_schema"]["properties"]
+            if "active_matches" not in props:
+                return json.dumps({
+                    "status": "ok", "concept": "uses detailed steps",
+                    "confidence": "high",
+                    "evidence_summary": "Activators use detailed steps; controls do not.",
+                })
+            na = props["active_matches"]["minItems"]
+            nz = props["control_matches"]["minItems"]
+            final = self.calls == 6
+            active = ([True] * max(1, na // 2) + [False] * (na - max(1, na // 2))
+                      if final else [True] * na)
+            control = ([True] * min(nz, max(1, na // 2))
+                       + [False] * (nz - min(nz, max(1, na // 2)))
+                       if final else [False] * nz)
+            return json.dumps({
+                "status": "ok", "concept": "uses detailed steps",
+                "confidence": "high",
+                "evidence_summary": "Activators use detailed steps; controls do not.",
+                "active_matches": active, "control_matches": control,
+            })
+
+    client = FinalOverlapClient()
+    row = name_individual_features(
+        battles, z_a, z_b, client, features=[0], n_active=3, n_zero=2,
+        n_candidates=2, candidate_pool_factor=2, verify_frac=0.0).iloc[0]
+    assert client.calls == 6
+    assert row["status"] == "insufficient_evidence" and row["concept"] == ""
+    assert "naming evidence does not support" in row["evidence_summary"]
+    assert "controls also match" in row["evidence_summary"]
+
+
+def test_individual_polysemantic_label_is_preserved_without_verification_screen():
+    n = 10
+    battles = pd.DataFrame({
+        "instruction_id": [str(i) for i in range(n)],
+        "prompt": [f"p{i}" for i in range(n)],
+        "completion_a": [f"a{i}" for i in range(n)],
+        "completion_b": [f"b{i}" for i in range(n)],
+    })
+    z_a = np.zeros((n, 1), dtype=np.float32)
+    z_a[:3, 0] = 1.0
+    z_b = np.zeros((n, 1), dtype=np.float32)
+
+    class MixedClient:
+        def raw(self, messages, **kw):
+            return json.dumps({
+                "status": "polysemantic",
+                "concept": "medical guidance; source-code explanation",
+                "confidence": "medium",
+                "active_matches": [False, False, False],
+                "control_matches": [False, False, False],
+            })
+
+    row = name_individual_features(
+        battles, z_a, z_b, MixedClient(), features=[0],
+        n_active=3, n_zero=3, verify_frac=0.0).iloc[0]
+    assert row["status"] == "polysemantic"
+    assert row["concept"] == "medical guidance; source-code explanation"
+    assert not row["naming_screen_pass"]
+    assert not row["naming_review_performed"]
+
+
+def test_individual_close_controls_use_wholly_silent_unique_source_groups():
+    battles = pd.DataFrame({
+        "instruction_id": [str(i) for i in range(11)],
+        "group_id": ["a", "a", "b", "c", "m", "m", "z", "z", "y", "x", "w"],
+        "prompt": [f"p{i}" for i in range(11)],
+        "completion_a": [
+            "active-a", "silent-a-sibling", "active-b", "active-c",
+            "low-active-m", "silent-m-sibling", "first-zero-z", "duplicate-zero-z",
+            "zero-y", "zero-x", "zero-w",
+        ],
+    })
+    z = np.zeros((11, 2), dtype=np.float32)
+    z[[0, 2, 3, 4], 0] = [9, 8, 7, 1]
+    z[6:, 1] = 1.0
+
+    client = FakeClient()
+    name_individual_features(
+        battles, z, None, client, features=[0], n_active=3, n_zero=3,
+        verify_frac=0.0, negatives="close", cand_cap=3, seed=0)
+    proposal = client.prompts[0]
+    assert "active-a" in proposal and "active-b" in proposal and "active-c" in proposal
+    assert "silent-a-sibling" not in proposal
+    assert "silent-m-sibling" not in proposal
+    eligible = ("first-zero-z", "duplicate-zero-z", "zero-y", "zero-x", "zero-w")
+    assert sum(text in proposal for text in eligible) == 3
+    assert not ("first-zero-z" in proposal and "duplicate-zero-z" in proposal)
