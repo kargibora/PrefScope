@@ -27,15 +27,23 @@ provided:
 """
 from __future__ import annotations
 
+from numbers import Integral
+
 import numpy as np
 import pandas as pd
 
+from prefscope.core.features import validate_feature_ids
 from prefscope.recipes.analysis.presence import annotation_flag
 
 
 def feature_distance(z: np.ndarray) -> np.ndarray:
     """(M, M) co-activation distance 1 - |corr| between feature columns."""
-    z = np.asarray(z, dtype=np.float64)
+    z = np.asarray(z)
+    if z.ndim != 2 or z.dtype.kind not in "biuf" or not np.isfinite(z).all():
+        raise ValueError("z must be a finite real 2D code matrix")
+    if z.shape[1] == 1:
+        return np.zeros((1, 1))
+    z = z.astype(np.float64, copy=False)
     with np.errstate(invalid="ignore", divide="ignore"):
         c = np.corrcoef(z.T)                      # nan for zero-variance columns
     d = 1.0 - np.abs(c)
@@ -51,7 +59,10 @@ def feature_mi(z: np.ndarray) -> np.ndarray:
     and MI is computed in closed form from the 2x2 co-firing contingency. The
     diagonal is zeroed; never-firing features contribute zero MI.
     """
-    fired = (np.asarray(z) != 0).astype(np.float64)        # (N, M)
+    z = np.asarray(z)
+    if z.ndim != 2 or z.dtype.kind not in "biuf" or not np.isfinite(z).all():
+        raise ValueError("z must be a finite real 2D code matrix")
+    fired = (z != 0).astype(np.float64)                   # (N, M)
     n, m = fired.shape
     if n == 0:
         return np.zeros((m, m))
@@ -92,7 +103,7 @@ def feature_cofire_affinity(
     dependence. Signed lens concepts describe the positive pole, so the default
     uses ``z > 0`` and ignores the unnamed negative pole. ``metric`` can be
     positive ``phi`` (chance-corrected), binary ``cosine`` (overlap), or
-    support-shrunk positive ``npmi``. Negative association is clipped to zero.
+    support-thresholded positive ``npmi``. Negative association is clipped to zero.
 
     Counts are accumulated in chunks so a large ``N x M`` firing matrix is never
     materialized. With ``return_stats=True``, ``stats["phi"]`` retains the signed
@@ -104,12 +115,16 @@ def feature_cofire_affinity(
         raise ValueError("metric must be 'phi', 'cosine', or 'npmi'")
     if min_cooccur < 0:
         raise ValueError("min_cooccur must be >= 0")
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, Integral) or chunk_size <= 0:
+        raise ValueError("chunk_size must be a positive integer")
 
     shape = getattr(z, "shape", None)
     if shape is None or len(shape) != 2:
         raise ValueError("z must be a 2D code matrix")
-    feats = np.arange(shape[1], dtype=int) if features is None \
-        else np.asarray([int(f) for f in features], dtype=int)
+    feature_ids = range(shape[1]) if features is None else validate_feature_ids(features)
+    if any(f < 0 or f >= shape[1] for f in feature_ids):
+        raise ValueError("features contain an index outside z")
+    feats = np.asarray(feature_ids, dtype=int)
     m = len(feats)
     if m == 0:
         empty = np.zeros((0, 0), dtype=float)
@@ -121,7 +136,10 @@ def feature_cofire_affinity(
     cooccur = np.zeros((m, m), dtype=np.float64)
     n = 0
     for start in range(0, shape[0], chunk_size):
-        block = np.asarray(z[start:start + chunk_size])[:, feats]
+        block = np.asarray(z[start:start + chunk_size])
+        if block.dtype.kind not in "biuf" or not np.isfinite(block).all():
+            raise ValueError("z must be a finite real 2D code matrix")
+        block = block[:, feats]
         if pole == "positive":
             fired = block > 0
         elif pole == "negative":
@@ -157,10 +175,6 @@ def feature_cofire_affinity(
             ppmi = np.maximum(np.log(np.maximum(ratio, 1e-30)), 0.0)
             affinity = np.divide(ppmi, -np.log(np.maximum(p11, 1e-30)),
                                  out=np.zeros_like(ppmi), where=p11 > 0)
-            # Smooth the brittle rare-event tail rather than letting one coincidence
-            # become the strongest graph edge.
-            if min_cooccur:
-                affinity *= np.minimum(1.0, cooccur / float(min_cooccur))
 
         if min_cooccur:
             affinity = np.where(cooccur >= min_cooccur, affinity, 0.0)
@@ -260,7 +274,7 @@ def _leiden_partition(mi: np.ndarray, *, resolution: float, seed: int,
         labels, min_community_size, policy=small_community_policy)
 
 
-def _spherical_kmeans(points: np.ndarray, k: int) -> np.ndarray:
+def _spherical_kmeans(points: np.ndarray, k: int, *, seed: int = 0) -> np.ndarray:
     """Cosine k-means: unit-normalize each row of ``points`` (zero-norm rows stay
     at the origin) and assign one of ``k`` clusters. Returns (n,) int labels."""
     from sklearn.cluster import KMeans
@@ -269,7 +283,7 @@ def _spherical_kmeans(points: np.ndarray, k: int) -> np.ndarray:
     norms = np.linalg.norm(x, axis=1, keepdims=True)
     x = np.divide(x, norms, out=np.zeros_like(x), where=norms > 1e-8)
     with np.errstate(all="ignore"):
-        return KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(x)
+        return KMeans(n_clusters=k, n_init=10, random_state=seed).fit_predict(x)
 
 
 def cluster_features(z: np.ndarray, n_clusters: int = 10,
@@ -289,12 +303,26 @@ def cluster_features(z: np.ndarray, n_clusters: int = 10,
     the preset ``n_clusters``; the latter can degenerate into one blob plus
     singletons when correlations are weak (sparse TopK codes).
     """
-    feats = list(range(z.shape[1])) if features is None else [int(f) for f in features]
+    if method not in {"mi-leiden", "cofire-leiden", "agglomerative", "spherical-kmeans"}:
+        raise ValueError(
+            "method must be 'cofire-leiden', 'mi-leiden', 'spherical-kmeans', "
+            "or 'agglomerative', "
+            f"got {method!r}")
+    shape = getattr(z, "shape", None)
+    if shape is None or len(shape) != 2:
+        raise ValueError("z must be a 2D code matrix")
+    feats = list(range(shape[1]) if features is None else validate_feature_ids(features))
+    if any(f < 0 or f >= shape[1] for f in feats):
+        raise ValueError("features contain an index outside z")
+    if method != "cofire-leiden":
+        z = np.asarray(z)
+        if z.dtype.kind not in "biuf" or not np.isfinite(z).all():
+            raise ValueError("z must be a finite real 2D code matrix")
+        z = z.astype(np.float32, copy=False)
     if not feats:
         return pd.DataFrame(columns=["feature_id", "cluster_id"])
 
     if method == "mi-leiden":
-        z = np.asarray(z, dtype=np.float32)
         sub = z[:, feats]
         labels = _leiden_partition(feature_mi(sub), resolution=resolution, seed=seed,
                                    knn=knn, min_community_size=min_community_size,
@@ -355,23 +383,19 @@ def cluster_features(z: np.ndarray, n_clusters: int = 10,
             result.attrs["run_diagnostics"]["super_resolution"] = float(super_resolution)
         return result
     elif method == "agglomerative":
-        z = np.asarray(z, dtype=np.float32)
         sub = z[:, feats]
         from sklearn.cluster import AgglomerativeClustering
         k = max(1, min(n_clusters, len(feats)))
-        labels = AgglomerativeClustering(
-            n_clusters=k, metric="precomputed", linkage="average"
-        ).fit_predict(feature_distance(sub))
+        if len(feats) == 1:
+            labels = np.zeros(1, dtype=int)
+        else:
+            labels = AgglomerativeClustering(
+                n_clusters=k, metric="precomputed", linkage="average"
+            ).fit_predict(feature_distance(sub))
     elif method == "spherical-kmeans":
-        z = np.asarray(z, dtype=np.float32)
         sub = z[:, feats]
         k = max(1, min(n_clusters, len(feats)))
-        labels = _spherical_kmeans(sub.T, k)   # cluster feature columns
-    else:
-        raise ValueError(
-            "method must be 'cofire-leiden', 'mi-leiden', 'spherical-kmeans', "
-            "or 'agglomerative', "
-            f"got {method!r}")
+        labels = _spherical_kmeans(sub.T, k, seed=seed)   # cluster feature columns
 
     return pd.DataFrame({"feature_id": feats, "cluster_id": labels.astype(int)})
 
@@ -408,7 +432,10 @@ def cluster_examples(profile: np.ndarray, n_clusters: int = 10, *,
     """
     if method != "spherical-kmeans":
         raise ValueError(f"cluster_examples supports 'spherical-kmeans', got {method!r}")
-    x = np.asarray(profile, dtype=np.float32)
+    x = np.asarray(profile)
+    if x.ndim != 2 or x.dtype.kind not in "biuf" or not np.isfinite(x).all():
+        raise ValueError("profile must be a finite real 2D matrix")
+    x = x.astype(np.float32, copy=False)
     n = x.shape[0]
     labels = _spherical_kmeans(x, max(1, min(n_clusters, n)))
     return pd.DataFrame({"example_index": np.arange(n), "cluster_id": labels.astype(int)})
@@ -421,6 +448,7 @@ def summarize_clusters(clusters: pd.DataFrame,
     Multi-feature communities receive a neutral provisional label until an explicit
     naming step runs. This prevents an arbitrary high-fidelity member from masquerading
     as an umbrella behavior (the old source of labels such as ``written in Russian``).
+    ``names`` must contain at most one annotation row per feature.
     """
     if clusters.empty:
         return pd.DataFrame(columns=[
@@ -435,7 +463,7 @@ def summarize_clusters(clusters: pd.DataFrame,
     if names is not None:
         keep = [c for c in ("feature_id", "concept", "correlation", "fidelity_pass")
                 if c in names.columns]
-        df = df.merge(names[keep], on="feature_id", how="left")
+        df = df.merge(names[keep], on="feature_id", how="left", validate="many_to_one")
 
     rows = []
     for cid, g in df.groupby("cluster_id"):

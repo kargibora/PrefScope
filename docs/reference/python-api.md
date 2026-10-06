@@ -98,6 +98,20 @@ table = feature_activation_table(batch.matrix("z_a"), catalog=catalog)
 `FeatureCatalog` holds proposed display annotations. It never changes activation data.
 `feature_activation_table(...)` joins by `feature_id`.
 
+Derived feature views are declared by the lens manifest and can be discovered without
+knowing their implementation details:
+
+```python
+lens.derived_views
+lens.featurize_derived(items, view="poles")
+lens.catalog_for("poles")
+```
+
+For signed activations, the built-in `signed_to_poles` view creates virtual IDs `2*f`
+and `2*f+1`. Models whose native activation is nonnegative do not advertise that view.
+The native `Lens.featurize(...)` output and `m_total` always remain unchanged.
+
+
 Catalog JSON helpers:
 
 - `encode_feature_catalog(catalog)`
@@ -169,7 +183,7 @@ export_viewer_bundle(
 ```
 
 The required Viewer directory must already be built and declare support for
-`prefscope.viewer_data` v1 in its root `viewer-build.json`. The new output directory is a
+`prefscope.viewer_data` v2 in its root `viewer-build.json`. The new output directory is a
 self-contained static site with copied Viewer assets, serialized supplied data, and a
 hashed inventory. The bridge does not build the Viewer or derive maps, examples,
 distributions, or coactivation.
@@ -180,3 +194,19 @@ Modules below `prefscope.recipes.analysis`, `prefscope.recipes.pipeline`, and
 `prefscope.recipes.viewer_export` retain specialized implementations for reuse. They are
 not exported from `prefscope`, covered by the stable API, registered, or automatically
 orchestrated. Prefer copying or wrapping the exact recipe your study needs.
+
+## Lens bundles
+
+A bundle is a validated container of independent lenses. Load it explicitly so the
+single-lens loading contract remains stable:
+
+```python
+from prefscope import load_bundle
+
+bundle = load_bundle("hf://owner/repository")
+prompt = bundle["prompt"]
+completion = bundle["completion"]
+```
+
+Children are loaded lazily and keep independent feature-space identities and catalogs.
+Use `Lens.from_pretrained(..., subfolder="prompt")` for the packaged `prompt` member when only one child is needed.

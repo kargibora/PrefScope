@@ -89,6 +89,25 @@ vectors, with no A/B pairing. Its default SAE codes are non-negative activations
 `LensRep` is marked non-contrastive, and contrast operations (bank / diagnose) refuse
 it with a clear message rather than producing nonsense.
 
+
+## Derived feature views
+
+A lens keeps its native feature coordinates unchanged. A model may declare optional
+**derived views**, which are deterministic transforms of those native activations. The
+manifest records each view's source and transform. The transform determines its width,
+virtual IDs, and activation semantics. A consumer can inspect `Lens.derived_views` and
+request a view by name with `Lens.featurize_derived(...)`.
+
+The first built-in transform is `signed_to_poles`, available for signed activations. It
+splits each native coordinate `f` into nonnegative strengths with virtual IDs `2*f`
+(positive) and `2*f+1` (negative):
+
+$$c_{2f}=\max(z_f,0),\qquad c_{2f+1}=\max(-z_f,0).$$
+
+This is an interpretation view, not a second trained lens. Models with nonnegative
+native activations do not advertise this view. Derived catalogs are separate from native
+catalogs and carry their source coordinate-space identity.
+
 For a practical choice, see [Build and analyze a lens](../how-to/build-and-analyze-a-lens.md).
 For exact flags, see the [CLI reference](../reference/cli.md). To replace the vector
 source, see [Add a representation source](../extending/add-a-representation-source.md).

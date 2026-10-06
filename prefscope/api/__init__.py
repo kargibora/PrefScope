@@ -9,6 +9,7 @@ from prefscope.api.feature_catalog_io import (
     save_feature_catalog,
 )
 from prefscope.api.loaded_lens import Lens, pairs_to_battles
+from prefscope.api.lens_bundle import LensBundle
 from prefscope.api.representation import (
     EmbeddingRepresentationSource,
     PrecomputedRepresentationSource,
@@ -30,6 +31,7 @@ from prefscope.integrations.saelens import SAELensProjector, SAELensTextBackend
 
 __all__ = [
     "Lens",
+    "LensBundle",
     "pairs_to_battles",
     "PairItem",
     "Dataset",

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from prefscope.recipes.pipeline.cluster import (
     _postprocess_small_communities,
@@ -100,3 +101,34 @@ def test_cofire_leiden_emits_stability_diagnostics():
     assert diag["method"] == "cofire-leiden"
     assert diag["seed_ari_mean"] == 1.0
     assert diag["n_clusters"] == 2
+
+
+@pytest.mark.parametrize("chunk_size", [-1, 0, 1.5, True])
+@pytest.mark.parametrize("features", [[], [0], [0, 1]])
+def test_chunk_size_is_validated_before_shortcuts(chunk_size, features):
+    from prefscope.recipes.analysis.feature_graph import feature_relationships
+
+    for recipe in (feature_cofire_affinity, feature_relationships):
+        with pytest.raises(ValueError, match="chunk_size must be a positive integer"):
+            recipe(np.ones((4, 2)), features=features, chunk_size=chunk_size)
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf, -np.inf, 1j, "1"])
+@pytest.mark.parametrize("pole", ["positive", "negative", "nonzero"])
+def test_cofire_rejects_invalid_raw_chunks_before_firing(bad, pole):
+    z = np.array([[0, 0], [bad, 1]])
+    with pytest.raises(ValueError, match="finite real"):
+        feature_cofire_affinity(z, pole=pole, chunk_size=1)
+
+
+@pytest.mark.parametrize("dtype", [bool, np.float32])
+def test_npmi_support_is_a_hard_threshold_with_unchanged_counts(dtype):
+    z = np.array([[1, 1], [1, 1], [0, 0], [0, 0]], dtype=dtype)
+    for threshold, expected in ((0, 1.0), (1, 1.0), (2, 1.0), (3, 0.0)):
+        affinity, stats = feature_cofire_affinity(
+            z, metric="npmi", min_cooccur=threshold, chunk_size=np.int64(1),
+            return_stats=True,
+        )
+        np.testing.assert_array_equal(affinity, [[0, expected], [expected, 0]])
+        np.testing.assert_array_equal(stats["cooccur"], [[2, 2], [2, 2]])
+        assert stats["n"] == 4

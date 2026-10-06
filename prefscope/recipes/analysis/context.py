@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import binomtest, hypergeom
 
+from prefscope.core.features import validate_feature_ids
 from prefscope.recipes.analysis.grouping import typed_group_keys, validate_group_ids
 from prefscope.recipes.analysis.presence import annotation_flag, feature_thresholds
 
@@ -27,12 +28,23 @@ def _strict_boolean_array(values, *, name: str, ndim: int) -> np.ndarray:
         raise ValueError(f"{name} must be {ndim}-D")
     if raw.dtype == bool:
         return raw
-    if not np.issubdtype(raw.dtype, np.number):
-        raise ValueError(f"{name} must contain boolean or numeric 0/1 values")
+    if (not np.issubdtype(raw.dtype, np.number)
+            or np.issubdtype(raw.dtype, np.complexfloating)):
+        raise ValueError(f"{name} must contain boolean or real numeric 0/1 values")
     numeric = np.asarray(raw, dtype=float)
     if not np.isfinite(numeric).all() or not np.isin(numeric, [0.0, 1.0]).all():
         raise ValueError(f"{name} must contain finite boolean or numeric 0/1 values")
     return numeric.astype(bool)
+
+
+def _finite_score_matrix(values, *, name: str) -> np.ndarray:
+    scores = np.asarray(values)
+    if (scores.ndim != 2
+            or not (scores.dtype == bool or np.issubdtype(scores.dtype, np.number))
+            or np.issubdtype(scores.dtype, np.complexfloating)
+            or not np.isfinite(scores).all()):
+        raise ValueError(f"{name} must be a 2-D matrix of finite real scores")
+    return scores
 
 
 def _entropy(probabilities) -> float:
@@ -117,10 +129,9 @@ def _context_membership(prompt_context, context_ids=None):
                 raise ValueError("prompt_context_ids must be unique")
             ordered_keys = list(requested_keys)
             labels = requested
-        membership = np.column_stack([
-            np.asarray([key == requested for key in value_keys], dtype=bool)
-            for requested in ordered_keys
-        ])
+        membership = np.zeros((len(values), len(ordered_keys)), dtype=bool)
+        for j, requested in enumerate(ordered_keys):
+            membership[:, j] = [key == requested for key in value_keys]
         ids = labels
     elif contexts.ndim == 2:
         membership = _strict_boolean_array(
@@ -194,13 +205,17 @@ def profile_prompt_linkage(
     and a link must recur for the same concept at multiple tail sizes. Absence of a
     detected link is deliberately not called general behavior: the prompt vocabulary
     may be incomplete. No LLM call or semantic-presence threshold is involved.
+    Both response and prompt tails include all ties at their score cutoff, so the
+    response set may exceed top_n and prompt tails may exceed their target size.
+    Input scores must be finite and real. Feature and prompt-context IDs must be
+    non-boolean integers; prompt-context IDs must also be unique.
     """
-    z_a = np.asarray(z_a)
-    z_b = np.asarray(z_b)
-    prompt_scores = np.asarray(prompt_scores)
-    if z_a.ndim != 2 or z_b.ndim != 2 or z_a.shape != z_b.shape:
+    z_a = _finite_score_matrix(z_a, name="z_a")
+    z_b = _finite_score_matrix(z_b, name="z_b")
+    prompt_scores = _finite_score_matrix(prompt_scores, name="prompt_scores")
+    if z_a.shape != z_b.shape:
         raise ValueError("z_a and z_b must be aligned 2-D arrays")
-    if prompt_scores.ndim != 2 or len(prompt_scores) != len(z_a):
+    if len(prompt_scores) != len(z_a):
         raise ValueError("prompt scores must be 2-D and align with completion rows")
     if top_n < 1 or min_top_examples < 1 or min_tail_overlap < 1:
         raise ValueError("top_n and minimum example counts must be positive")
@@ -219,10 +234,9 @@ def profile_prompt_linkage(
     context_ids = (
         np.arange(prompt_scores.shape[1], dtype=int)
         if prompt_context_ids is None
-        else np.asarray(prompt_context_ids)
+        else np.asarray(validate_feature_ids(
+            prompt_context_ids, width=prompt_scores.shape[1]), dtype=int)
     )
-    if len(context_ids) != prompt_scores.shape[1]:
-        raise ValueError("prompt_context_ids must have one entry per prompt score column")
 
     n_rows = len(prompt_scores)
     tail_memberships = []
@@ -232,7 +246,7 @@ def profile_prompt_linkage(
         membership = np.zeros(prompt_scores.shape, dtype=bool)
         sizes = np.zeros(prompt_scores.shape[1], dtype=int)
         for j in range(prompt_scores.shape[1]):
-            values = np.asarray(prompt_scores[:, j], dtype=np.float32)
+            values = prompt_scores[:, j]
             positive = np.flatnonzero(values > 0)
             n_tail = min(target, len(positive))
             if not n_tail:
@@ -240,10 +254,10 @@ def profile_prompt_linkage(
             if n_tail == len(positive):
                 selected = positive
             else:
-                local = np.argpartition(values[positive], -n_tail)[-n_tail:]
-                selected = positive[local]
+                cutoff = np.partition(values[positive], -n_tail)[-n_tail]
+                selected = positive[values[positive] >= cutoff]
             membership[selected, j] = True
-            sizes[j] = n_tail
+            sizes[j] = len(selected)
         tail_memberships.append(membership)
         tail_sizes.append(sizes)
 
@@ -252,42 +266,30 @@ def profile_prompt_linkage(
     else:
         if "feature_id" not in features.columns:
             raise ValueError("features need a feature_id column")
-        table = features.copy()
-        table["feature_id"] = pd.to_numeric(
-            table["feature_id"], errors="raise"
-        ).astype(int)
-        table = table.drop_duplicates("feature_id", keep="last")
+        table = features.drop_duplicates("feature_id", keep="last").copy()
+        table["feature_id"] = validate_feature_ids(table["feature_id"])
+        if not table["feature_id"].between(0, z_a.shape[1] - 1).all():
+            raise ValueError(f"feature ids must be inside [0, {z_a.shape[1]})")
         if "fidelity_pass" in table.columns:
             table = table[table["fidelity_pass"].map(annotation_flag)]
-    table = table[
-        table["feature_id"].between(0, z_a.shape[1] - 1, inclusive="both")
-    ].sort_values("feature_id")
+    table = table.sort_values("feature_id")
     annotations = table.set_index("feature_id", drop=False)
-    prompt_map = (
-        {
-            int(row.feature_id): str(row.concept)
-            for row in prompt_names.drop_duplicates("feature_id", keep="last").itertuples()
-        }
-        if prompt_names is not None
-        and {"feature_id", "concept"} <= set(prompt_names.columns)
-        else {}
-    )
+    prompt_map = {}
+    if prompt_names is not None and {"feature_id", "concept"} <= set(prompt_names.columns):
+        prompt_table = prompt_names.drop_duplicates("feature_id", keep="last")
+        prompt_ids = validate_feature_ids(prompt_table["feature_id"])
+        prompt_map = dict(zip(prompt_ids, prompt_table["concept"].astype(str)))
 
     rows = []
     for feature_id in table["feature_id"].astype(int):
         annotation = annotations.loc[feature_id]
-        score = np.maximum(
-            np.asarray(z_a[:, feature_id], dtype=np.float32),
-            np.asarray(z_b[:, feature_id], dtype=np.float32),
-        )
+        score = np.maximum(z_a[:, feature_id], z_b[:, feature_id])
         positive = np.flatnonzero(score > 0)
         if len(positive) > top_n:
-            selected_local = np.argpartition(score[positive], -top_n)[-top_n:]
-            selected = positive[selected_local]
+            cutoff = np.partition(score[positive], -top_n)[-top_n]
+            selected = positive[score[positive] >= cutoff]
         else:
             selected = positive
-        if len(selected):
-            selected = selected[np.argsort(score[selected], kind="stable")[::-1]]
         n_top = int(len(selected))
         counts_by_scale = []
         lift_by_scale = []
@@ -359,8 +361,8 @@ def profile_prompt_linkage(
         )
         strong_threshold = float(score[selected].min()) if n_top else float("nan")
         if n_top:
-            pa = np.asarray(z_a[:, feature_id], dtype=np.float32) >= strong_threshold
-            pb = np.asarray(z_b[:, feature_id], dtype=np.float32) >= strong_threshold
+            pa = z_a[:, feature_id] >= strong_threshold
+            pb = z_b[:, feature_id] >= strong_threshold
             any_side = pa | pb
             paired_choice = (
                 float((pa ^ pb).sum() / any_side.sum())
@@ -447,7 +449,15 @@ def profile_prompt_linkage(
                 ),
             }
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=[
+        "feature_id", "concept", "scope_method", "prompt_scope", "scope_reason",
+        "feature_type", "semantic_role", "requested_share", "n_positive_prompts",
+        "n_top_prompts", "strong_activation_threshold", "paired_choice_ratio",
+        "prompt_tail_fractions_json", "min_stable_scales", "n_linked_prompt_contexts",
+        "n_supported_prompt_contexts", "effective_prompt_contexts",
+        "normalized_prompt_breadth", "reference_prompt_tail_fraction",
+        "max_prompt_context_share", "max_prompt_context_lift", "top_prompt_contexts_json",
+    ])
 
 
 def classify_feature(*, semantic_role: str, requested_share: float,
@@ -498,20 +508,32 @@ def profile_feature_context(z_a, z_b, calibration: pd.DataFrame,
                             min_choice_ratio: float = 0.15,
                             prompt_content_max_choice: float = 0.15,
                             on_feature=None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Profile calibrated per-side presence without materializing N x M codes."""
+    """Profile calibrated per-side presence from finite real score matrices.
+
+    Calibration feature IDs must be unique non-boolean integers. Context labels
+    retain their external values and types; counting uses membership columns.
+    """
+    z_a = _finite_score_matrix(z_a, name="z_a")
+    z_b = _finite_score_matrix(z_b, name="z_b")
     n = z_a.shape[0]
-    if z_b.shape[0] != n or len(prompt_context) != n or len(model_a) != n or len(model_b) != n:
+    if z_a.shape != z_b.shape or len(prompt_context) != n or len(model_a) != n or len(model_b) != n:
         raise ValueError("completion codes, prompt contexts, and model columns must align")
     cal = calibration.copy()
-    candidate_ids = pd.to_numeric(cal["feature_id"], errors="raise").astype(int).to_numpy()
+    candidate_ids = np.asarray(validate_feature_ids(cal["feature_id"]), dtype=int)
+    if (candidate_ids < 0).any() or (candidate_ids >= z_a.shape[1]).any():
+        raise ValueError(f"feature ids must be inside [0, {z_a.shape[1]})")
     thresholds, calibrated = feature_thresholds(cal, candidate_ids)
     cal = cal.loc[calibrated].copy()
     cal["semantic_threshold"] = thresholds[calibrated]
     name_map = ({int(r.feature_id): str(r.concept) for r in names.itertuples()}
                 if names is not None and "concept" in names.columns else {})
-    prompt_map = ({int(r.feature_id): str(r.concept) for r in prompt_names.itertuples()}
+    prompt_map = (dict(zip(typed_group_keys(prompt_names["feature_id"]),
+                           prompt_names["concept"].astype(str)))
                   if prompt_names is not None and "concept" in prompt_names.columns else {})
     context_ids, membership = _context_membership(prompt_context, prompt_context_ids)
+    context_ids = [value.item() if isinstance(value, np.generic) else value
+                   for value in context_ids]
+    context_keys = typed_group_keys(context_ids)
     model_a = np.asarray(model_a, dtype=str)
     model_b = np.asarray(model_b, dtype=str)
 
@@ -523,21 +545,18 @@ def profile_feature_context(z_a, z_b, calibration: pd.DataFrame,
     for models_side in (model_a, model_b):
         for i, model in enumerate(models_side):
             for j in np.flatnonzero(membership[i]):
-                model_context_battles[(str(model), context_ids[j])] += 1
-    context_counts = {context_ids[j]: int(all_membership[:, j].sum())
-                      for j in range(len(context_ids))}
+                model_context_battles[(str(model), j)] += 1
+    context_counts = all_membership.sum(axis=0)
     feature_rows, model_rows = [], []
 
     for crow in cal.itertuples():
         f = int(crow.feature_id)
-        if f < 0 or f >= z_a.shape[1] or f >= z_b.shape[1]:
-            continue
         threshold = float(crow.semantic_threshold)
-        pa = np.asarray(z_a[:, f], dtype=np.float32) >= threshold
-        pb = np.asarray(z_b[:, f], dtype=np.float32) >= threshold
+        pa = z_a[:, f] >= threshold
+        pb = z_b[:, f] >= threshold
         side_presence = np.concatenate((pa, pb))
         present_vector = all_membership[side_presence].sum(axis=0).astype(int)
-        present_counts = {context_ids[j]: int(value) for j, value in enumerate(present_vector)
+        present_counts = {j: int(value) for j, value in enumerate(present_vector)
                           if value > 0}
         n_present = int(side_presence.sum())
         supported = {k: v for k, v in present_counts.items()
@@ -559,15 +578,16 @@ def profile_feature_context(z_a, z_b, calibration: pd.DataFrame,
             general_max_prompt_dependence=general_max_prompt_dependence,
             min_choice_ratio=min_choice_ratio,
             prompt_content_max_choice=prompt_content_max_choice)
-        top_contexts = [{"prompt_feature_id": int(k),
-                         "concept": prompt_map.get(int(k), ""),
+        top_contexts = [{"prompt_feature_id": context_ids[j],
+                         "concept": prompt_map.get(context_keys[j], ""),
                          "n_present": int(v), "share": float(v / max(1, n_present))}
-                        for k, v in sorted(present_counts.items(),
-                                           key=lambda item: (-item[1], str(item[0])))[:8]]
+                        for j, v in sorted(present_counts.items(),
+                                           key=lambda item: (-item[1], str(context_ids[item[0]])))[:8]]
         feature_row = {
             "feature_id": f, "concept": name_map.get(f, str(getattr(crow, "concept", ""))),
             "semantic_role": role, "requested_share": requested_share,
-            "semantic_threshold": threshold, "semantic_presence_rate": n_present / (2 * n),
+            "semantic_threshold": threshold,
+            "semantic_presence_rate": n_present / (2 * n) if n else float("nan"),
             "prompt_dependence_nmi": nmi, "prompt_context_js": js,
             "effective_prompt_contexts": effective,
             "max_prompt_context_share": max_share,
@@ -596,11 +616,11 @@ def profile_feature_context(z_a, z_b, calibration: pd.DataFrame,
             context_effects = []
             for j, ctx in enumerate(context_ids):
                 vals = direction[membership[battle_rows, j]]
-                total = model_context_battles[(model, ctx)]
+                total = model_context_battles[(model, j)]
                 if total < min_model_context_battles or len(vals) < min_model_context_discordant:
                     continue
                 context_effects.append({
-                    "prompt_feature_id": int(ctx), "concept": prompt_map.get(int(ctx), ""),
+                    "prompt_feature_id": ctx, "concept": prompt_map.get(context_keys[j], ""),
                     "n_battles": int(total), "n_discordant": int(len(vals)),
                     "choice_effect": float(vals.mean()),
                 })
@@ -622,14 +642,25 @@ def profile_feature_context(z_a, z_b, calibration: pd.DataFrame,
                     np.isfinite(consistency) and consistency >= consistency_threshold),
                 "top_contexts_json": json.dumps(
                     sorted(context_effects, key=lambda x: (-x["n_discordant"],
+                                                          type(x["prompt_feature_id"]).__name__,
                                                           x["prompt_feature_id"]))[:8],
                     ensure_ascii=False),
             })
 
-    features = pd.DataFrame(feature_rows)
-    models = pd.DataFrame(model_rows)
+    features = pd.DataFrame(feature_rows, columns=[
+        "feature_id", "concept", "semantic_role", "requested_share", "semantic_threshold",
+        "semantic_presence_rate", "prompt_dependence_nmi", "prompt_context_js",
+        "effective_prompt_contexts", "max_prompt_context_share",
+        "n_supported_prompt_contexts", "paired_choice_ratio", "behavior_category",
+        "top_prompt_contexts_json",
+    ])
+    models = pd.DataFrame(model_rows, columns=[
+        "model", "feature_id", "concept", "feature_category", "n_battles", "n_discordant",
+        "net_choice_rate", "discordant_direction", "p_value", "n_supported_contexts",
+        "cross_context_consistency", "cross_context_stable_raw", "top_contexts_json",
+        "q_value", "cross_context_stable", "behavior_category",
+    ])
     if not models.empty:
-        models["q_value"] = np.nan
         for _, idx in models.groupby("model").groups.items():
             models.loc[idx, "q_value"] = _bh_adjust(models.loc[idx, "p_value"].to_numpy())
         models["cross_context_stable"] = (

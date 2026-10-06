@@ -33,7 +33,7 @@ from prefscope.api._lens_publication import (
     _recover_orphan_backup as _recover_orphan_backup,
     save_lens,
 )
-from prefscope.artifacts import MANIFEST, SAE_MODEL
+from prefscope.artifacts import DERIVED_FEATURE_CATALOG, MANIFEST, SAE_MODEL
 
 
 class Lens:
@@ -143,6 +143,7 @@ class Lens:
         self.backend = backend
         self.granularity = self.manifest.get("granularity", "response")
         self.lens_dir = None  # set by from_dir/load; None when constructed directly
+        self._derived_catalog = None
 
     @classmethod
     def from_config(cls, config, *, device: str | None = None) -> "Lens":
@@ -167,6 +168,8 @@ class Lens:
         *,
         device: str = "cpu",
         annotations=None,
+        derived_catalog=None,
+        prompt_pole_catalog=None,
         embedding_cache=None,
         embed_backend: str = "hf",
         embed_batch_size: int | None = None,
@@ -177,6 +180,8 @@ class Lens:
         ``annotations`` may be an interpretation directory, one CSV, or an iterable
         of either.  Canonical names/fidelity/calibration/context/cluster tables are
         merged by ``feature_id`` and become available through ``feature_table``.
+        ``derived_catalog`` optionally loads a separate virtual positive/negative
+        catalog without changing the native lens feature width.
         """
         from prefscope.config import CONFIG
         from prefscope.encode.cache import NpyCache
@@ -194,8 +199,19 @@ class Lens:
             raise
         from prefscope.core.manifest import LensManifest
 
+        if derived_catalog is not None and prompt_pole_catalog is not None:
+            raise ValueError("specify derived_catalog or prompt_pole_catalog, not both")
+        derived_catalog = derived_catalog or prompt_pole_catalog
         lens_dir = Path(lens_dir)
         manifest_path = lens_dir / MANIFEST
+        if manifest_path.is_file():
+            try:
+                if json.loads(manifest_path.read_text()).get("artifact_type") == "lens_bundle":
+                    raise ValueError(
+                        "artifact is a lens bundle; use load_bundle() or choose a subfolder"
+                    )
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid lens manifest in {lens_dir}") from exc
         model_path = lens_dir / SAE_MODEL
         missing = [str(p.name) for p in (manifest_path, model_path) if not p.is_file()]
         if missing:
@@ -255,6 +271,26 @@ class Lens:
         )
         lens = cls(projector, embedder, names=names, manifest=manifest)
         lens.lens_dir = lens_dir
+        catalog_path = lens_dir / DERIVED_FEATURE_CATALOG
+        if derived_catalog is not None:
+            catalog_path = Path(derived_catalog)
+            if catalog_path.is_dir():
+                catalog_path = catalog_path / DERIVED_FEATURE_CATALOG
+            if not catalog_path.is_file():
+                raise FileNotFoundError(f"derived catalog path does not exist: {catalog_path}")
+        if catalog_path.is_file():
+            if not lens.derived_views:
+                raise ValueError("this lens declares no derived feature views")
+            from prefscope.api.derived_features import load_derived_catalog
+
+            view_name, view_spec = next(iter(lens.derived_views.items()))
+            lens._derived_catalog = load_derived_catalog(
+                catalog_path,
+                native_width=int(projector.m_total),
+                view_name=view_name,
+                transform=view_spec.get("transform", ""),
+                feature_space_id=lens.feature_space_id,
+            )
         # The live projector keeps its loaded weights and whitener even if another
         # publisher later replaces this directory. Keep their coordinate identity too.
         lens._loaded_native_feature_space_identity = lens.feature_space_identity
@@ -275,6 +311,8 @@ class Lens:
         subfolder: str | None = None,
         device: str = "cpu",
         annotations=None,
+        derived_catalog=None,
+        prompt_pole_catalog=None,
         embedding_cache=None,
         embed_backend: str = "hf",
         embed_batch_size: int | None = None,
@@ -282,7 +320,8 @@ class Lens:
         """Download a lens from the Hugging Face Hub and load it.
 
         A repository may contain one lens at its root or several lens directories,
-        selected with ``subfolder``. Mutable or omitted revisions are resolved to an
+        selected with ``subfolder``. Optional derived-view catalogs are loaded as
+        separate annotation spaces. Mutable or omitted revisions are resolved to an
         immutable commit before download. An explicit commit also works with
         ``local_files_only=True`` without a Hub metadata lookup.
         """
@@ -308,6 +347,8 @@ class Lens:
             lens_dir,
             device=device,
             annotations=annotations,
+            derived_catalog=derived_catalog,
+            prompt_pole_catalog=prompt_pole_catalog,
             embedding_cache=embedding_cache,
             embed_backend=embed_backend,
             embed_batch_size=embed_batch_size,
@@ -604,6 +645,17 @@ class Lens:
             features, views=resolved_views, feature_ids=selected
         )
 
+    def featurize_prompt_poles(self, dataset, *, feature_ids=None, batch_size=None):
+        """Backward-compatible prompt alias for the generic pole view."""
+        from prefscope.api.derived_features import derive_feature_matrix
+
+        features = self.featurize(
+            dataset, views=("prompt",), feature_ids=feature_ids, batch_size=batch_size
+        )
+        return derive_feature_matrix(
+            features.matrix("z_prompt"), "poles", native_width=int(self.backend.m_total)
+        )
+
     @property
     def concept_names(self):
         """Series mapping feature IDs to names, or ``None`` when unnamed."""
@@ -661,8 +713,94 @@ class Lens:
             raise ValueError(
                 "bundled feature catalog does not match the native feature space"
             )
-        # Explicit runtime annotations may intentionally replace bundled proposed names.
-        return bundled if dict(bundled.labels) == dict(current.labels) else current
+        # Runtime annotations can replace descriptions and types without changing names.
+        current_values = current.to_frame().set_index("feature_id")
+        bundled_values = bundled.to_frame().set_index("feature_id")
+        for column in current_values:
+            present = current_values[column].notna()
+            if present.any() and not current_values.loc[present, column].equals(
+                bundled_values.reindex(columns=[column]).loc[present, column]
+            ):
+                return current
+        return bundled
+
+    @property
+    def derived_views(self) -> dict[str, dict]:
+        """Return declared deterministic views available from this native lens."""
+        manifest_obj = getattr(self, "manifest_obj", None)
+        declared = (manifest_obj.extra if manifest_obj is not None else self.manifest).get(
+            "derived_views", {})
+        if not isinstance(declared, Mapping):
+            raise ValueError("manifest derived_views must be a mapping")
+        if declared:
+            return {str(name): dict(spec) for name, spec in declared.items()}
+        if self.activation_polarity == "signed":
+            source_view = {"prompt": "prompt", "individual": "response_a",
+                           "difference": "response_difference"}.get(self.input_rep)
+            if source_view is not None:
+                return {"poles": {"source_view": source_view, "transform": "signed_to_poles"}}
+        return {}
+
+    def featurize_derived(
+        self, dataset, *, view: str = "poles", feature_ids=None,
+        batch_size: int | None = None,
+    ):
+        """Featurize a declared derived view without changing native coordinates."""
+        spec = self.derived_views.get(view)
+        if spec is None:
+            available = ", ".join(sorted(self.derived_views)) or "none"
+            raise ValueError(f"derived view {view!r} is unavailable (available: {available})")
+        source_view = spec.get("source_view")
+        if source_view in ("individual", "difference"):
+            source_view = {"individual": "response_a", "difference": "response_difference"}[source_view]
+        source_array = {"prompt": "z_prompt", "response_a": "z_a",
+                        "response_difference": "z_diff"}.get(source_view)
+        if source_array is None:
+            raise ValueError(f"unsupported derived source view {source_view!r}")
+        from prefscope.api.derived_features import derive_feature_matrix
+
+        features = self.featurize(
+            dataset, views=(source_view,), feature_ids=feature_ids, batch_size=batch_size
+        )
+        transform_spec = dict(spec)
+        transform_spec.setdefault("name", view)
+        return derive_feature_matrix(
+            features.matrix(source_array), transform_spec,
+            native_width=int(self.backend.m_total)
+        )
+
+    def catalog_for(self, view: str = "poles"):
+        """Return the catalog for a declared derived view, if bundled."""
+        if view not in self.derived_views:
+            return None
+        if self._derived_catalog is not None:
+            if self._derived_catalog.provenance.get("view_name") != view:
+                raise ValueError("bundled derived catalog does not match the requested view")
+            return self._derived_catalog
+        if self.lens_dir is None:
+            return None
+        from prefscope.api.derived_features import load_derived_catalog
+
+        path = Path(self.lens_dir) / DERIVED_FEATURE_CATALOG
+        if not path.is_file():
+            return None
+        self._derived_catalog = load_derived_catalog(
+            path, native_width=int(self.backend.m_total), view_name=view,
+            transform=self.derived_views[view].get("transform", ""),
+            feature_space_id=self.feature_space_id,
+        )
+        return self._derived_catalog
+
+    @property
+    def derived_catalog(self):
+        """Return the default derived-view catalog, if bundled."""
+        return self.catalog_for()
+
+    @property
+    def prompt_pole_feature_table(self) -> pd.DataFrame | None:
+        """Backward-compatible alias for the default pole-view table."""
+        catalog = self.catalog_for("poles")
+        return None if catalog is None else catalog.to_frame()
 
     @property
     def feature_space_identity(self) -> dict[str, str | None]:
@@ -757,7 +895,11 @@ class Lens:
         *,
         overwrite: bool = False,
         annotations=None,
+        derived_catalog=None,
+        prompt_pole_catalog=None,
         inference_only: bool = False,
+        derived_view: str = "poles",
+        derived_transform: str = "signed_to_poles",
     ):
         """Publish this lens as a transactional whole-directory replacement."""
         return save_lens(
@@ -765,7 +907,10 @@ class Lens:
             dest,
             overwrite=overwrite,
             annotations=annotations,
+            derived_catalog=derived_catalog or prompt_pole_catalog,
             inference_only=inference_only,
+            derived_view=derived_view,
+            derived_transform=derived_transform,
         )
 
 

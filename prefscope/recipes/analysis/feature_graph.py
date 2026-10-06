@@ -70,21 +70,18 @@ def _concept_lookup(names: pd.DataFrame | None) -> dict[int, str]:
     return {int(row.feature_id): str(row.concept) for row in table.itertuples()}
 
 
-def _decoder_cosines(decoder: np.ndarray | None, features: np.ndarray) -> np.ndarray | None:
+def _decoder_cosines(decoder: np.ndarray | None, features: np.ndarray,
+                     n_features: int) -> np.ndarray | None:
     if decoder is None:
         return None
-    weight = np.asarray(decoder, dtype=np.float32)
-    if weight.ndim != 2:
-        raise ValueError("decoder must be a 2D weight matrix")
-    max_feature = int(features.max(initial=-1))
-    if weight.shape[1] > max_feature:
-        directions = weight[:, features]
-    elif weight.shape[0] > max_feature:
-        directions = weight[features].T
-    else:
+    weight = np.asarray(decoder)
+    if weight.ndim != 2 or weight.shape[1] != n_features:
         raise ValueError(
-            f"decoder shape {weight.shape} does not contain feature {max_feature}"
+            f"decoder must have shape (input_dim, {n_features}), got {weight.shape}"
         )
+    if weight.dtype.kind not in "biuf" or not np.isfinite(weight).all():
+        raise ValueError("decoder must be a finite real weight matrix")
+    directions = np.asarray(weight[:, features], dtype=np.float32)
     norms = np.linalg.norm(directions, axis=0, keepdims=True)
     unit = np.divide(
         directions, norms, out=np.zeros_like(directions), where=norms > 1e-8
@@ -140,34 +137,30 @@ def feature_relationships(
     ``containment_a_in_b`` with low reverse containment means that ``a`` is the
     narrower activation pattern and may specialize ``b``.
 
-    Names are used only to surface collisions and nearby labels; they never make a
-    pair a merge candidate.  Merging requires both bidirectional activation
-    containment and aligned decoder directions.
+    Decoder directions must have shape ``(input_dim, z.shape[1])``, even when
+    selecting a feature subset. Names can admit pairs but cannot replace the
+    bidirectional activation containment and decoder alignment required for merging.
+    ``min_cooccur`` limits activation-based admission only. It does not constrain
+    pairs admitted by decoder/name similarity or merge candidates; even one shared
+    firing event can meet the merge criteria.
     """
-    shape = getattr(z, "shape", None)
-    if shape is None or len(shape) != 2:
-        raise ValueError("z must be a 2D code matrix")
-    feats = (np.arange(shape[1], dtype=int) if features is None
-             else np.asarray([int(feature) for feature in features], dtype=int))
-    if len(feats) < 2:
-        return pd.DataFrame(columns=RELATION_COLUMNS)
-    if feats.min() < 0 or feats.max() >= shape[1]:
-        raise ValueError("features contain an index outside z")
-
     _, stats = feature_cofire_affinity(
         z,
-        features=feats,
+        features=features,
         pole=pole,
         metric="phi",
         min_cooccur=0,
         chunk_size=chunk_size,
         return_stats=True,
     )
+    feats = stats["features"]
+    decoder_cos = _decoder_cosines(decoder, feats, z.shape[1])
+    if len(feats) < 2:
+        return pd.DataFrame(columns=RELATION_COLUMNS)
     n = int(stats["n"])
     ones = np.asarray(stats["ones"], dtype=np.float64)
     both = np.asarray(stats["cooccur"], dtype=np.float64)
     phi_matrix = np.asarray(stats["phi"], dtype=np.float64)
-    decoder_cos = _decoder_cosines(decoder, feats)
     concepts = _concept_lookup(names)
 
     ii, jj = np.triu_indices(len(feats), k=1)
